@@ -241,6 +241,7 @@ py -m modal app logs transcodio-app
 # Start FastAPI server (after Modal is deployed)
 uv run uvicorn api.main:app --reload
 
+
 # Alternative: run directly
 uv run python api/main.py
 ```
