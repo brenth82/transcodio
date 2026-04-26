@@ -144,6 +144,8 @@ qwen_tts_image = (
         "torch==2.8.0",
         "torchaudio==2.8.0",
     )
+    .run_commands("pip install psutil")
+    .run_commands("pip install ninja")
     .run_commands("pip install flash-attn==2.8.3 --no-build-isolation")
     .pip_install(
         QWEN_TTS_SOURCE_REF,
