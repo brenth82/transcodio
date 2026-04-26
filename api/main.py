@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 import asyncio
 import uuid
+import time
 from datetime import datetime, timedelta
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request, Security
@@ -566,6 +567,10 @@ async def voice_clone(
         )
 
     try:
+        request_trace = uuid.uuid4().hex[:8]
+        t_request_start = time.perf_counter()
+        print(f"[voice-clone:{request_trace}] request started")
+
         # Validate language
         if language not in config.VOICE_CLONE_LANGUAGES:
             raise HTTPException(
@@ -594,8 +599,10 @@ async def voice_clone(
             )
 
         # Read reference audio
+        t_read_start = time.perf_counter()
         ref_audio_bytes = await ref_audio.read()
         file_size = len(ref_audio_bytes)
+        t_read = time.perf_counter() - t_read_start
 
         # Validate file size (max 15MB for reference audio)
         if file_size > 15 * 1024 * 1024:
@@ -606,6 +613,7 @@ async def voice_clone(
 
         # Preprocess reference audio (convert to 24kHz mono WAV)
         try:
+            t_preprocess_start = time.perf_counter()
             ref_duration, preprocessed_ref = validate_audio_file(
                 filename=ref_audio.filename,
                 file_size=file_size,
@@ -613,6 +621,7 @@ async def voice_clone(
                 content_type=ref_audio.content_type,
                 target_sample_rate=config.VOICE_CLONE_SAMPLE_RATE,
             )
+            t_preprocess = time.perf_counter() - t_preprocess_start
         except AudioValidationError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
@@ -633,8 +642,10 @@ async def voice_clone(
         try:
             import modal
 
+            t_modal_lookup_start = time.perf_counter()
             TTSModel = modal.Cls.from_name(config.MODAL_APP_NAME, "Qwen3TTSVoiceCloner")
             model = TTSModel()
+            t_modal_lookup = time.perf_counter() - t_modal_lookup_start
         except Exception as e:
             raise HTTPException(
                 status_code=503,
@@ -643,12 +654,14 @@ async def voice_clone(
 
         # Generate voice clone
         try:
+            t_remote_start = time.perf_counter()
             result = await model.generate_voice_clone.remote.aio(
                 preprocessed_ref,
                 ref_text,
                 target_text,
                 language
             )
+            t_remote = time.perf_counter() - t_remote_start
 
             if not result.get("success"):
                 raise HTTPException(
@@ -657,6 +670,7 @@ async def voice_clone(
                 )
 
             # Generate session ID and cache the generated audio
+            t_cache_start = time.perf_counter()
             session_id = str(uuid.uuid4())
             expiry_time = datetime.now() + timedelta(hours=1)
             audio_cache[session_id] = (
@@ -668,6 +682,14 @@ async def voice_clone(
 
             # Clean up expired entries
             cleanup_expired_audio()
+            t_cache = time.perf_counter() - t_cache_start
+
+            t_total = time.perf_counter() - t_request_start
+            print(
+                f"[voice-clone:{request_trace}] timing read={t_read:.3f}s "
+                f"preprocess={t_preprocess:.3f}s modal_lookup={t_modal_lookup:.3f}s "
+                f"remote_tts={t_remote:.3f}s cache={t_cache:.3f}s total={t_total:.3f}s"
+            )
 
             return VoiceCloneResponse(
                 success=True,
@@ -889,11 +911,16 @@ async def synthesize_with_voice(
 
     try:
         import modal
+        request_trace = uuid.uuid4().hex[:8]
+        t_request_start = time.perf_counter()
+        print(f"[synthesize:{request_trace}] request started")
 
         # Get saved voice
+        t_storage_start = time.perf_counter()
         VoiceStorage = modal.Cls.from_name(config.MODAL_APP_NAME, "VoiceStorage")
         storage = VoiceStorage()
         voice_data = await storage.get_voice.remote.aio(voice_id)
+        t_storage = time.perf_counter() - t_storage_start
 
         if not voice_data.get("success"):
             raise HTTPException(status_code=404, detail=voice_data.get("error", "Voice not found"))
@@ -902,15 +929,19 @@ async def synthesize_with_voice(
         ref_audio_bytes = voice_data["audio_bytes"]
 
         # Generate audio with TTS
+        t_modal_lookup_start = time.perf_counter()
         TTSModel = modal.Cls.from_name(config.MODAL_APP_NAME, "Qwen3TTSVoiceCloner")
         model = TTSModel()
+        t_modal_lookup = time.perf_counter() - t_modal_lookup_start
 
+        t_remote_start = time.perf_counter()
         result = await model.generate_voice_clone.remote.aio(
             ref_audio_bytes,
             metadata["ref_text"],
             target_text.strip(),
             metadata["language"],
         )
+        t_remote = time.perf_counter() - t_remote_start
 
         if not result.get("success"):
             raise HTTPException(
@@ -919,6 +950,7 @@ async def synthesize_with_voice(
             )
 
         # Cache generated audio
+        t_cache_start = time.perf_counter()
         session_id = str(uuid.uuid4())
         expiry_time = datetime.now() + timedelta(hours=1)
         audio_cache[session_id] = (
@@ -928,6 +960,14 @@ async def synthesize_with_voice(
             expiry_time,
         )
         cleanup_expired_audio()
+        t_cache = time.perf_counter() - t_cache_start
+
+        t_total = time.perf_counter() - t_request_start
+        print(
+            f"[synthesize:{request_trace}] timing storage={t_storage:.3f}s "
+            f"modal_lookup={t_modal_lookup:.3f}s remote_tts={t_remote:.3f}s "
+            f"cache={t_cache:.3f}s total={t_total:.3f}s"
+        )
 
         return SynthesizeResponse(
             success=True,

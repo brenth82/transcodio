@@ -117,6 +117,7 @@ MINUTES_CONTAINER_IDLE_TIMEOUT = 60  # 1 minute (shorter than STT since less fre
 # Voice Cloning Configuration
 ENABLE_VOICE_CLONING = True
 TTS_CONTAINER_IDLE_TIMEOUT = 20
+TTS_TIMEOUT = 900  # 15 minutes max per synthesis request
 
 # Available TTS Models
 TTS_MODELS = {

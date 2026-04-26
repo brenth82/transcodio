@@ -68,6 +68,7 @@ TTS_MODELS = {
     },
 }
 TTS_CONTAINER_IDLE_TIMEOUT = 20
+TTS_TIMEOUT = 900
 VOICES_INDEX_FILE = "index.json"
 MAX_SAVED_VOICES = 50
 
@@ -894,7 +895,7 @@ class VoiceStorage:
     image=qwen_tts_image,
     gpu=TTS_MODELS["qwen"]["gpu_type"],
     scaledown_window=TTS_CONTAINER_IDLE_TIMEOUT,
-    timeout=300,
+    timeout=TTS_TIMEOUT,
     memory=TTS_MODELS["qwen"]["memory_mb"],
     volumes={"/models": volume},
 )
@@ -906,18 +907,59 @@ class Qwen3TTSVoiceCloner:
         """Load Qwen3-TTS model once per container."""
         import torch
         import time
+        import os
 
         model_config = TTS_MODELS["qwen"]
         start_time = time.time()
         print(f"Loading Qwen3-TTS model: {model_config['model_id']}...")
 
+        def _cache_stats(path: str) -> tuple[int, int]:
+            """Return (file_count, total_bytes) for a cache path."""
+            if not os.path.exists(path):
+                return 0, 0
+            file_count = 0
+            total_bytes = 0
+            for root, _dirs, files in os.walk(path):
+                for filename in files:
+                    file_count += 1
+                    file_path = os.path.join(root, filename)
+                    try:
+                        total_bytes += os.path.getsize(file_path)
+                    except OSError:
+                        continue
+            return file_count, total_bytes
+
+        hf_home = os.getenv("HF_HOME", "/models")
+        hf_cache_path = os.path.join(hf_home, "hub")
+        before_files, before_bytes = _cache_stats(hf_cache_path)
+        print(
+            f"Qwen load cache before: path={hf_cache_path}, files={before_files}, "
+            f"size_mb={before_bytes / (1024 * 1024):.1f}"
+        )
+
         import warnings
         warnings.filterwarnings("ignore", message="FNV hashing is not implemented in Numba", category=UserWarning)
+        warnings.filterwarnings(
+            "ignore",
+            message=r"`torch_dtype` is deprecated! Use `dtype` instead!",
+            category=Warning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r"You are attempting to use Flash Attention 2 without specifying a torch dtype.*",
+            category=Warning,
+        )
         from qwen_tts import Qwen3TTSModel
 
         model_kwargs = {
             "device_map": "cuda:0",
+            # Keep explicit dtype to ensure bfloat16 inference on CUDA.
             "dtype": torch.bfloat16,
+        }
+        # Some upstream loaders still inspect torch_dtype for FlashAttention2.
+        flash_model_kwargs = {
+            **model_kwargs,
+            "torch_dtype": torch.bfloat16,
         }
 
         try:
@@ -926,20 +968,38 @@ class Qwen3TTSVoiceCloner:
             self.model = Qwen3TTSModel.from_pretrained(
                 model_config["model_id"],
                 attn_implementation="flash_attention_2",
-                **model_kwargs,
+                **flash_model_kwargs
             )
         except ImportError:
             print("flash-attn not installed; loading Qwen3-TTS without flash attention")
             self.model = Qwen3TTSModel.from_pretrained(
                 model_config["model_id"],
-                **model_kwargs,
+                **model_kwargs
             )
         except TypeError:
             print("Qwen3-TTS loader does not accept attn_implementation; falling back")
             self.model = Qwen3TTSModel.from_pretrained(
                 model_config["model_id"],
-                **model_kwargs,
+                **model_kwargs
             )
+
+        # Ensure inference-only behavior.
+        if hasattr(self.model, "eval"):
+            self.model.eval()
+
+        # Persist newly downloaded HF artifacts for reuse across cold starts.
+        try:
+            volume.commit()
+            print("Committed /models volume after Qwen model load")
+        except Exception as commit_error:
+            print(f"Volume commit skipped/failed: {commit_error}")
+
+        after_files, after_bytes = _cache_stats(hf_cache_path)
+        print(
+            f"Qwen load cache after: path={hf_cache_path}, files={after_files}, "
+            f"size_mb={after_bytes / (1024 * 1024):.1f}, "
+            f"delta_mb={(after_bytes - before_bytes) / (1024 * 1024):.1f}"
+        )
 
         load_time = time.time() - start_time
         print(f"Qwen3-TTS model loaded in {load_time:.2f}s")
@@ -964,44 +1024,68 @@ class Qwen3TTSVoiceCloner:
         Returns:
             Dict with audio_bytes and metadata
         """
+        import io
         import soundfile as sf
         import tempfile
         import time
         import os
+        import torch
 
+        ref_audio_path = None
         try:
             start_time = time.time()
+            t0 = time.perf_counter()
 
             # Save reference audio to temp file
+            t_write_ref_start = time.perf_counter()
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_ref:
                 tmp_ref.write(ref_audio_bytes)
                 ref_audio_path = tmp_ref.name
+            t_write_ref = time.perf_counter() - t_write_ref_start
 
             print(f"Generating voice clone for {len(target_text)} chars in {language}...")
 
-            # Generate audio with voice cloning
-            wavs, sr = self.model.generate_voice_clone(
-                text=target_text,
-                language=language,
-                ref_audio=ref_audio_path,
-                ref_text=ref_text,
-            )
+            # Inference mode avoids autograd overhead and keeps output quality unchanged.
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t_infer_start = time.perf_counter()
+            with torch.inference_mode():
+                wavs, sr = self.model.generate_voice_clone(
+                    text=target_text,
+                    language=language,
+                    ref_audio=ref_audio_path,
+                    ref_text=ref_text,
+                )
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t_infer = time.perf_counter() - t_infer_start
 
-            # Convert to bytes
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_out:
-                sf.write(tmp_out.name, wavs[0], sr)
-                with open(tmp_out.name, "rb") as f:
-                    audio_bytes = f.read()
-                output_path = tmp_out.name
+            # Serialize directly to memory to avoid extra disk write/read.
+            t_serialize_start = time.perf_counter()
+            wav_buffer = io.BytesIO()
+            sf.write(wav_buffer, wavs[0], sr, format="WAV")
+            audio_bytes = wav_buffer.getvalue()
+            t_serialize = time.perf_counter() - t_serialize_start
 
-            # Cleanup temp files
+            # Cleanup temp input file
+            t_cleanup_start = time.perf_counter()
             os.unlink(ref_audio_path)
-            os.unlink(output_path)
+            ref_audio_path = None
+            t_cleanup = time.perf_counter() - t_cleanup_start
 
             generation_time = time.time() - start_time
+            t_total = time.perf_counter() - t0
             duration = len(wavs[0]) / sr
 
             print(f"Voice clone generated in {generation_time:.2f}s, duration: {duration:.2f}s")
+            print(
+                "TTS timing breakdown: "
+                f"write_ref={t_write_ref:.3f}s, "
+                f"inference={t_infer:.3f}s, "
+                f"serialize={t_serialize:.3f}s, "
+                f"cleanup={t_cleanup:.3f}s, "
+                f"total={t_total:.3f}s"
+            )
 
             return {
                 "success": True,
@@ -1018,6 +1102,12 @@ class Qwen3TTSVoiceCloner:
                 "success": False,
                 "error": str(e),
             }
+        finally:
+            if ref_audio_path and os.path.exists(ref_audio_path):
+                try:
+                    os.unlink(ref_audio_path)
+                except OSError:
+                    pass
 
 
 @app.cls(
@@ -1052,7 +1142,7 @@ class FluxImageGenerator:
 
         self.pipe = FluxPipeline.from_pretrained(
             IMAGE_GENERATION_MODEL,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
         )
         # Use sequential CPU offload for lower memory usage
         self.pipe.enable_sequential_cpu_offload()
