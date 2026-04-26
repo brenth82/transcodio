@@ -53,6 +53,10 @@ MINUTES_TEMPERATURE = 0.3
 MINUTES_CONTAINER_IDLE_TIMEOUT = 60
 
 # Voice cloning
+QWEN_TTS_SOURCE_REF = (
+    "git+https://github.com/QwenLM/Qwen3-TTS.git"
+    "@1ab0dd75353392f28a0d05d9ca960c9954b13c83"
+)
 TTS_MODELS = {
     "qwen": {
         "name": "Qwen3-TTS",
@@ -135,12 +139,33 @@ qwen_tts_image = (
         "HF_HOME": "/models",
         "DEBIAN_FRONTEND": "noninteractive",
     })
-    .apt_install("ffmpeg", "libsndfile1", "sox")
+    .apt_install("ffmpeg", "git", "libsndfile1", "sox")
     .pip_install(
-        "qwen-tts",
-        "torch",
-        "transformers",
-        "soundfile>=0.12.1",
+        "torch==2.8.0",
+        "torchaudio==2.8.0",
+    )
+    .run_commands("pip install flash-attn==2.8.3 --no-build-isolation")
+    .pip_install(
+        QWEN_TTS_SOURCE_REF,
+        "faster-whisper==1.2.1",
+        "ctranslate2==4.7.1",
+        "audiotsm==0.1.2",
+        "chardet==5.2.0",
+        "ffmpeg-python==0.2.0",
+        "librosa==0.11.0",
+        "loguru==0.7.3",
+        "metaphone==0.6",
+        "mutagen==1.47.0",
+        "natsort==8.4.0",
+        "num2words==0.5.14",
+        "nvidia-ml-py",
+        "pyloudnorm==0.1.1",
+        "psutil",
+        "pydantic",
+        "pysbd==0.3.4",
+        "soundfile==0.13.1",
+        "whisper_normalizer==0.1.12",
+        "xxhash==3.5.0",
     )
 )
 
@@ -888,11 +913,31 @@ class Qwen3TTSVoiceCloner:
         warnings.filterwarnings("ignore", message="FNV hashing is not implemented in Numba", category=UserWarning)
         from qwen_tts import Qwen3TTSModel
 
-        self.model = Qwen3TTSModel.from_pretrained(
-            model_config["model_id"],
-            device_map="cuda:0",
-            dtype=torch.bfloat16,
-        )
+        model_kwargs = {
+            "device_map": "cuda:0",
+            "dtype": torch.bfloat16,
+        }
+
+        try:
+            import flash_attn  # noqa: F401
+            print("flash-attn detected; attempting flash_attention_2")
+            self.model = Qwen3TTSModel.from_pretrained(
+                model_config["model_id"],
+                attn_implementation="flash_attention_2",
+                **model_kwargs,
+            )
+        except ImportError:
+            print("flash-attn not installed; loading Qwen3-TTS without flash attention")
+            self.model = Qwen3TTSModel.from_pretrained(
+                model_config["model_id"],
+                **model_kwargs,
+            )
+        except TypeError:
+            print("Qwen3-TTS loader does not accept attn_implementation; falling back")
+            self.model = Qwen3TTSModel.from_pretrained(
+                model_config["model_id"],
+                **model_kwargs,
+            )
 
         load_time = time.time() - start_time
         print(f"Qwen3-TTS model loaded in {load_time:.2f}s")

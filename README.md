@@ -9,7 +9,7 @@ Transcodio is a production-ready platform powered by NVIDIA's Parakeet TDT 0.6B 
 - **Real-time Streaming Transcription**: Progressive results via SSE with silence-based segmentation using NVIDIA Parakeet TDT 0.6B v3
 - **Speaker Diarization**: Automatic speaker identification using NVIDIA TitaNet embeddings + AgglomerativeClustering
 - **Meeting Minutes**: AI-powered summaries with action items using Anthropic Claude Haiku 4.5
-- **Voice Cloning**: Clone any voice with Qwen3-TTS — upload or record reference audio (up to 5 minutes), then synthesize up to 50,000 characters of text
+- **Voice Cloning**: Clone any voice with Qwen3-TTS — upload or record reference audio (up to 5 minutes), then synthesize up to 50,000 characters of text. The Modal TTS container is pinned to the Qwen3-TTS source build at commit `1ab0dd75353392f28a0d05d9ca960c9954b13c83` and installs `flash-attn==2.8.3` with `--no-build-isolation`.
 - **Saved Voice Profiles**: Persistently store voice profiles in Modal Volume for reuse without re-uploading
 - **Image Generation**: Text-to-image using FLUX.1-schnell with 4-step inference (~3-5 seconds per image)
 - **Audio Playback**: Integrated player to listen to uploaded audio alongside transcription
