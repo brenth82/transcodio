@@ -69,6 +69,19 @@ TTS_MODELS = {
 }
 TTS_CONTAINER_IDLE_TIMEOUT = 20
 TTS_TIMEOUT = 900
+TTS_ENABLE_CHUNKING = True
+TTS_CHUNK_MAX_WORDS = 80          # max words per chunk (pysbd-based splitting)
+TTS_SHORT_SENTENCE_WORDS = 3      # sentences <= this get merged with a neighbor
+TTS_ENABLE_BATCHING = True
+TTS_BATCH_SIZE = 8
+# Gap inserted between stitched chunks based on the boundary type
+TTS_GAP_PARAGRAPH_MS = 400        # blank line / paragraph break
+TTS_GAP_SENTENCE_MS = 180         # sentence-end punctuation (. ! ?)
+TTS_GAP_CLAUSE_MS = 60            # clause boundary (, ; : — –)
+TTS_EDGE_TRIM_MS = 120
+TTS_EDGE_SILENCE_THRESHOLD_DB = -42.0   # dB below peak RMS for edge trim
+TTS_SILENCE_GAP_LIMIT_MS = 500          # cap any internal silence gap longer than this
+TTS_LUFS_TARGET = -18.0                 # loudness normalization target (LUFS)
 VOICES_INDEX_FILE = "index.json"
 MAX_SAVED_VOICES = 50
 
@@ -150,26 +163,18 @@ qwen_tts_image = (
     .run_commands("pip install flash-attn==2.8.3 --no-build-isolation")
     .pip_install(
         QWEN_TTS_SOURCE_REF,
-        "faster-whisper==1.2.1",
-        "ctranslate2==4.7.1",
-        "audiotsm==0.1.2",
         "chardet==5.2.0",
         "ffmpeg-python==0.2.0",
         "librosa==0.11.0",
-        "loguru==0.7.3",
-        "metaphone==0.6",
-        "mutagen==1.47.0",
-        "natsort==8.4.0",
         "num2words==0.5.14",
-        "nvidia-ml-py",
         "pyloudnorm==0.1.1",
         "psutil",
         "pydantic",
         "pysbd==0.3.4",
         "soundfile==0.13.1",
-        "whisper_normalizer==0.1.12",
-        "xxhash==3.5.0",
+        "spacy==3.8.4",
     )
+    .run_commands("python -m spacy download en_core_web_sm")
 )
 
 
@@ -1029,7 +1034,694 @@ class Qwen3TTSVoiceCloner:
         import tempfile
         import time
         import os
+        import re
+        import numpy as np
         import torch
+        import pysbd
+
+        def _prepare_text_for_tts_document(text: str, language: str = "en") -> str:
+            """
+            Document-level text preparation before chunking.
+
+            This stage mirrors the first half of commercial TTS pipelines: clean the
+            source, expand things that materially affect spoken length, then hand the
+            chunker text that already resembles what will be spoken.
+            """
+            import unicodedata
+            import html as _html
+            from num2words import num2words
+
+            lang_map = {
+                "english": "en", "spanish": "es", "french": "fr", "german": "de",
+                "russian": "ru", "portuguese": "pt", "italian": "it",
+                "chinese": "zh", "japanese": "ja", "korean": "ko",
+            }
+            nw_lang = lang_map.get(language.lower(), "en")
+
+            # ------------------------------------------------------------------ #
+            # 1. Unicode + smart punctuation
+            # ------------------------------------------------------------------ #
+            text = unicodedata.normalize("NFKC", text)
+            text = _html.unescape(text)
+            for src, dst in {
+                "\u2018": "'", "\u2019": "'",
+                "\u201C": '"', "\u201D": '"',
+                "\u2013": ", ",
+                "\u2014": ", ",
+                "\u2026": "...",
+                "\u00B7": " ",
+                "\u2022": "",
+                "\u00A0": " ",
+                "\u00AD": "",      # soft hyphen
+            }.items():
+                text = text.replace(src, dst)
+
+            # ------------------------------------------------------------------ #
+            # 2. Strip HTML
+            # ------------------------------------------------------------------ #
+            text = re.sub(r"<[^>]+>", " ", text)
+
+            # ------------------------------------------------------------------ #
+            # 2b. Strip Markdown
+            # ------------------------------------------------------------------ #
+            text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+            text = re.sub(r"\*{1,3}([^*\n]+)\*{1,3}", r"\1", text)
+            text = re.sub(r"_{1,3}([^_\n]+)_{1,3}", r"\1", text)
+            text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+            text = re.sub(r"`([^`]+)`", r"\1", text)
+            text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
+            text = re.sub(r"!\[[^\]]*\]\([^\)]+\)", " ", text)
+            text = re.sub(r"^[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
+            text = re.sub(r"^>\s+", "", text, flags=re.MULTILINE)
+            text = re.sub(r"^[\s]*[-*+]\s+", "", text, flags=re.MULTILINE)
+            text = re.sub(r"^[\s]*\d+\.\s+", "", text, flags=re.MULTILINE)
+
+            # ------------------------------------------------------------------ #
+            # 3. URLs and emails
+            # ------------------------------------------------------------------ #
+            text = re.sub(r"https?://[^\s,;)\"']+", "link", text)
+            text = re.sub(
+                r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Z|a-z]{2,}\b",
+                "email address", text,
+            )
+
+            # ------------------------------------------------------------------ #
+            # 4. Social handles and hashtags
+            # ------------------------------------------------------------------ #
+            text = re.sub(r"@([A-Za-z0-9_]+)", lambda m: "at " + m.group(1), text)
+            text = re.sub(r"#([A-Za-z0-9_]+)", lambda m: m.group(1), text)
+
+            # ------------------------------------------------------------------ #
+            # 5. Repeated punctuation collapse
+            # ------------------------------------------------------------------ #
+            text = re.sub(r"!{2,}", "!", text)
+            text = re.sub(r"\?{2,}", "?", text)
+            text = re.sub(r"\.{3,}", "...", text)   # keep ellipsis as exactly 3
+            text = re.sub(r",{2,}", ",", text)
+
+            # ------------------------------------------------------------------ #
+            # 6. Abbreviation / honorific expansion (English)
+            # ------------------------------------------------------------------ #
+            ABBREV_EN = {
+                r"\bMr\.": "Mister",     r"\bMrs\.": "Missus",
+                r"\bMs\.":  "Miss",      r"\bDr\.":  "Doctor",
+                r"\bProf\.":"Professor", r"\bSgt\.": "Sergeant",
+                r"\bCpl\.": "Corporal",  r"\bLt\.":  "Lieutenant",
+                r"\bCol\.": "Colonel",   r"\bGen\.": "General",
+                r"\bSt\.":  "Saint",     r"\bAve\.": "Avenue",
+                r"\bBlvd\.":"Boulevard", r"\bDept\.":"Department",
+                r"\bvs\.":  "versus",    r"\bvs\b":  "versus",
+                r"\betc\.": "et cetera", r"\be\.g\.":"for example",
+                r"\bi\.e\.":"that is",   r"\bw/\b":  "with",
+                r"\bw/o\b": "without",   r"\b&\b":   "and",
+                r"\b%\b":   "percent",   r"\bapprox\.": "approximately",
+                r"\bappt\.":"appointment",r"\binfo\.": "information",
+                r"\bFYI\b": "for your information",
+                r"\bIMHO\b":"in my humble opinion",
+                r"\bIRL\b": "in real life",
+                r"\bAKA\b": "also known as",
+                r"\bASAP\b":"as soon as possible",
+                r"\bTBD\b": "to be determined",
+                r"\bTBA\b": "to be announced",
+                r"\bRSVP\b":"please respond",
+            }
+            if nw_lang == "en":
+                for pattern, expansion in ABBREV_EN.items():
+                    text = re.sub(pattern, expansion, text)
+
+            # ------------------------------------------------------------------ #
+            # 7. All-caps sentence de-casing
+            # Common short words / known acronyms that STAY uppercase
+            # ------------------------------------------------------------------ #
+            KEEP_UPPER = {
+                "I", "AM", "PM", "OK", "TV", "PC", "ID",
+                "US", "UK", "EU", "UN", "AI", "ML", "IT",
+            }
+            def _decap_allcaps(m: re.Match) -> str:
+                word = m.group(0)
+                if word in KEEP_UPPER:
+                    return word
+                # Already handled by acronym spacing step below if len >= 3
+                return word.capitalize()
+            # Only target ALL-CAPS words of 4+ chars that aren't already known acronyms
+            text = re.sub(r"\b[A-Z]{4,}\b", _decap_allcaps, text)
+
+            # ------------------------------------------------------------------ #
+            # 8. Roman numerals  (I–XXXIX, conservative to avoid false positives)
+            # ------------------------------------------------------------------ #
+            ROMAN = {
+                "I": 1, "II": 2, "III": 3, "IV": 4, "V": 5,
+                "VI": 6, "VII": 7, "VIII": 8, "IX": 9, "X": 10,
+                "XI": 11, "XII": 12, "XIII": 13, "XIV": 14, "XV": 15,
+                "XVI": 16, "XVII": 17, "XVIII": 18, "XIX": 19, "XX": 20,
+                "XXI": 21, "XXII": 22, "XXIII": 23, "XXIV": 24, "XXV": 25,
+                "XXVI": 26, "XXVII": 27, "XXVIII": 28, "XXIX": 29, "XXX": 30,
+                "XXXI": 31, "XXXII": 32, "XXXIII": 33, "XXXIV": 34, "XXXV": 35,
+                "XXXVI": 36, "XXXVII": 37, "XXXVIII": 38, "XXXIX": 39,
+                "XL": 40, "L": 50,
+            }
+            # Only expand when preceded by a word like Chapter/Part/Section/Act/Volume/Book
+            roman_pat = r"\b(Chapter|Part|Section|Act|Volume|Book|Episode|Phase|Stage)\s+(" + \
+                        "|".join(sorted(ROMAN.keys(), key=len, reverse=True)) + r")\b"
+            def _expand_roman(m: re.Match) -> str:
+                try:
+                    return f"{m.group(1)} {num2words(ROMAN[m.group(2)], to='ordinal', lang=nw_lang)}"
+                except Exception:
+                    return m.group(0)
+            text = re.sub(roman_pat, _expand_roman, text)
+
+            # ------------------------------------------------------------------ #
+            # 9. Phone numbers
+            # ------------------------------------------------------------------ #
+            def _expand_phone(m: re.Match) -> str:
+                digits = re.sub(r"\D", "", m.group(0))
+                # Group: (NXX) NXX-XXXX or NXX-NXX-XXXX
+                if len(digits) == 10:
+                    groups = [digits[:3], digits[3:6], digits[6:]]
+                elif len(digits) == 11 and digits[0] == "1":
+                    groups = [digits[1:4], digits[4:7], digits[7:]]
+                else:
+                    return m.group(0)
+                spoken = []
+                for g in groups:
+                    spoken.append(", ".join(num2words(int(d), lang=nw_lang) for d in g))
+                return ", ".join(spoken)
+            text = re.sub(
+                r"(?<!\d)(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}(?!\d)",
+                _expand_phone, text,
+            )
+
+            # ------------------------------------------------------------------ #
+            # 10. Fractions
+            # ------------------------------------------------------------------ #
+            FRAC_MAP = {
+                "1/2": "one half",       "1/3": "one third",
+                "2/3": "two thirds",     "1/4": "one quarter",
+                "3/4": "three quarters", "1/5": "one fifth",
+                "2/5": "two fifths",     "3/5": "three fifths",
+                "4/5": "four fifths",    "1/8": "one eighth",
+                "3/8": "three eighths",  "5/8": "five eighths",
+                "7/8": "seven eighths",
+            }
+            for frac, spoken in FRAC_MAP.items():
+                text = re.sub(r"(?<!\d)" + re.escape(frac) + r"(?!\d)", spoken, text)
+            # Generic N/M not already caught
+            def _expand_generic_frac(m: re.Match) -> str:
+                try:
+                    n, d = int(m.group(1)), int(m.group(2))
+                    if d == 0:
+                        return m.group(0)
+                    numer = num2words(n, lang=nw_lang)
+                    denom = num2words(d, to="ordinal", lang=nw_lang)
+                    if n != 1:
+                        denom += "s"
+                    return f"{numer} {denom}"
+                except Exception:
+                    return m.group(0)
+            text = re.sub(r"(?<!\d)(\d+)/(\d+)(?!\d)", _expand_generic_frac, text)
+
+            # ------------------------------------------------------------------ #
+            # 11. Units of measure
+            # ------------------------------------------------------------------ #
+            UNITS = {
+                # Distance
+                r"km\b": "kilometers",   r"mi\b": "miles",
+                r"m\b":  "meters",       r"cm\b": "centimeters",
+                r"mm\b": "millimeters",  r"ft\b": "feet",
+                r"in\b": "inches",       r"yd\b": "yards",
+                # Weight
+                r"kg\b": "kilograms",    r"g\b":  "grams",
+                r"mg\b": "milligrams",   r"lb\b": "pounds",
+                r"lbs\b":"pounds",       r"oz\b": "ounces",
+                # Volume
+                r"L\b":  "liters",       r"mL\b": "milliliters",
+                r"ml\b": "milliliters",  r"gal\b":"gallons",
+                r"fl oz\b": "fluid ounces",
+                # Temperature
+                r"°F\b": "degrees Fahrenheit",
+                r"°C\b": "degrees Celsius",
+                r"°K\b": "Kelvin",
+                # Speed
+                r"mph\b": "miles per hour",
+                r"kph\b": "kilometers per hour",
+                r"km/h\b":"kilometers per hour",
+                r"m/s\b": "meters per second",
+                # Data
+                r"KB\b": "kilobytes",    r"MB\b": "megabytes",
+                r"GB\b": "gigabytes",    r"TB\b": "terabytes",
+                r"Kb\b": "kilobits",     r"Mb\b": "megabits",
+                r"Gb\b": "gigabits",
+                # Time
+                r"ms\b": "milliseconds", r"µs\b": "microseconds",
+                r"ns\b": "nanoseconds",
+                # Misc
+                r"MHz\b":"megahertz",    r"GHz\b":"gigahertz",
+                r"kHz\b":"kilohertz",    r"Hz\b": "hertz",
+                r"kW\b": "kilowatts",    r"MW\b": "megawatts",
+                r"W\b":  "watts",        r"V\b":  "volts",
+                r"A\b":  "amps",
+            }
+            for unit_pat, unit_word in UNITS.items():
+                text = re.sub(r"(\d)\s*" + unit_pat, r"\1 " + unit_word, text)
+
+            # ------------------------------------------------------------------ #
+            # 12. Currencies
+            # ------------------------------------------------------------------ #
+            def _expand_currency(m: re.Match) -> str:
+                symbol = m.group(1)
+                amount_str = m.group(2).replace(",", "")
+                currency_map = {
+                    "$": ("dollar", "dollars", "cent", "cents"),
+                    "€": ("euro",   "euros",   "cent", "cents"),
+                    "£": ("pound",  "pounds",  "penny","pence"),
+                    "¥": ("yen",    "yen",     "sen",  "sen"),
+                }
+                names = currency_map.get(symbol, ("unit", "units", "subunit", "subunits"))
+                try:
+                    if "." in amount_str:
+                        major, minor = amount_str.split(".", 1)
+                        minor = minor[:2].ljust(2, "0")
+                        major_val = int(major) if major else 0
+                        minor_val = int(minor)
+                        parts = []
+                        if major_val or not minor_val:
+                            parts.append(f"{num2words(major_val, lang=nw_lang)} "
+                                         f"{names[0] if major_val == 1 else names[1]}")
+                        if minor_val:
+                            parts.append(f"{num2words(minor_val, lang=nw_lang)} "
+                                         f"{names[2] if minor_val == 1 else names[3]}")
+                        return " and ".join(parts)
+                    else:
+                        val = int(amount_str)
+                        return f"{num2words(val, lang=nw_lang)} {names[0] if val == 1 else names[1]}"
+                except Exception:
+                    return m.group(0)
+            text = re.sub(r"([$€£¥])([\d,]+(?:\.\d+)?)", _expand_currency, text)
+
+            # ------------------------------------------------------------------ #
+            # 13. Ordinals
+            # ------------------------------------------------------------------ #
+            def _expand_ordinal(m: re.Match) -> str:
+                try:
+                    return num2words(int(m.group(1)), to="ordinal", lang=nw_lang)
+                except Exception:
+                    return m.group(0)
+            text = re.sub(r"\b(\d+)(?:st|nd|rd|th)\b", _expand_ordinal, text)
+
+            # ------------------------------------------------------------------ #
+            # 14. Dates
+            # ------------------------------------------------------------------ #
+            MONTHS = (
+                "January|February|March|April|May|June|July|August|"
+                "September|October|November|December|"
+                "Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec"
+            )
+            def _expand_named_date(month: str, day: str, year: str) -> str:
+                day_word = num2words(int(day), to="ordinal", lang=nw_lang)
+                return f"{month} {day_word}, {year}" if year and year.strip() else f"{month} {day_word}"
+            text = re.sub(
+                rf"\b({MONTHS})\s+(\d{{1,2}})(?:,?\s+(\d{{4}}))?\b",
+                lambda m: _expand_named_date(m.group(1), m.group(2), m.group(3) or ""),
+                text,
+            )
+            def _expand_numeric_date(m: re.Match) -> str:
+                try:
+                    mo, day, yr = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                    month_names = ["January","February","March","April","May","June",
+                                   "July","August","September","October","November","December"]
+                    if 1 <= mo <= 12 and 1 <= day <= 31:
+                        day_word = num2words(day, to="ordinal", lang=nw_lang)
+                        return f"{month_names[mo-1]} {day_word}, {yr}"
+                    return m.group(0)
+                except Exception:
+                    return m.group(0)
+            text = re.sub(r"\b(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})\b", _expand_numeric_date, text)
+
+            # ------------------------------------------------------------------ #
+            # 15. Times
+            # ------------------------------------------------------------------ #
+            def _expand_time(hour: int, minute: int, ampm: str) -> str:
+                h_word = num2words(hour, lang=nw_lang)
+                if minute == 0:
+                    t_str = f"{h_word} o'clock"
+                elif minute < 10:
+                    t_str = f"{h_word} oh {num2words(minute, lang=nw_lang)}"
+                else:
+                    t_str = f"{h_word} {num2words(minute, lang=nw_lang)}"
+                ampm = ampm.strip().upper().replace(".", "")
+                if ampm == "AM":
+                    t_str += " AM"
+                elif ampm == "PM":
+                    t_str += " PM"
+                return t_str
+            def _time_match(m: re.Match) -> str:
+                try:
+                    return _expand_time(int(m.group(1)), int(m.group(2) or 0), m.group(3) or "")
+                except Exception:
+                    return m.group(0)
+            text = re.sub(r"\b(\d{1,2}):(\d{2})\s*(AM|PM|am|pm|A\.M\.|P\.M\.)?\b", _time_match, text)
+            def _short_time_match(m: re.Match) -> str:
+                try:
+                    return _expand_time(int(m.group(1)), 0, m.group(2))
+                except Exception:
+                    return m.group(0)
+            text = re.sub(r"\b(\d{1,2})(am|pm|AM|PM)\b", _short_time_match, text)
+
+            # ------------------------------------------------------------------ #
+            # 16. Plain numbers → words
+            # ------------------------------------------------------------------ #
+            def _expand_number(m: re.Match) -> str:
+                try:
+                    raw = m.group(0).replace(",", "")
+                    if "." in raw:
+                        int_part, dec_part = raw.split(".", 1)
+                        words = num2words(int(int_part), lang=nw_lang)
+                        if dec_part and int(dec_part) != 0:
+                            digit_words = " ".join(num2words(int(d), lang=nw_lang) for d in dec_part)
+                            words += " point " + digit_words
+                        return words
+                    else:
+                        val = int(raw)
+                        if abs(val) > 999_999_999:
+                            return m.group(0)
+                        return num2words(val, lang=nw_lang)
+                except Exception:
+                    return m.group(0)
+            text = re.sub(r"\b\d{1,3}(?:,\d{3})*(?:\.\d+)?\b|\b\d+(?:\.\d+)?\b", _expand_number, text)
+
+            # ------------------------------------------------------------------ #
+            # ------------------------------------------------------------------ #
+            # 17. Final whitespace cleanup
+            # ------------------------------------------------------------------ #
+            text = re.sub(r" {2,}", " ", text)
+            text = re.sub(r"\n{3,}", "\n\n", text)
+            text = text.strip()
+
+            return text
+
+        def _polish_tts_chunk_text(text: str, language: str = "en") -> str:
+            """
+            Chunk-local polish immediately before synthesis.
+
+            This is where pronunciation-sensitive cleanup lives: acronym expansion,
+            small punctuation cleanup, and conservative homograph rewrites that rely
+            on sentence-level context.
+            """
+            lang_map = {
+                "english": "en", "spanish": "es", "french": "fr", "german": "de",
+                "russian": "ru", "portuguese": "pt", "italian": "it",
+                "chinese": "zh", "japanese": "ja", "korean": "ko",
+            }
+            nw_lang = lang_map.get(language.lower(), "en")
+            keep_upper = {
+                "I", "AM", "PM", "OK", "TV", "PC", "ID",
+                "US", "UK", "EU", "UN", "AI", "ML", "IT",
+            }
+
+            def _match_case(source: str, replacement: str) -> str:
+                if source.isupper():
+                    return replacement.upper()
+                if source and source[0].isupper():
+                    return replacement.capitalize()
+                return replacement
+
+            text = re.sub(
+                r"\b[A-Z]{3,}\b",
+                lambda m: " ".join(m.group(0)) if m.group(0) not in keep_upper else m.group(0),
+                text,
+            )
+
+            if nw_lang == "en":
+                try:
+                    import spacy
+
+                    nlp = getattr(self, "_tts_en_nlp", None)
+                    if nlp is None:
+                        try:
+                            nlp = spacy.load("en_core_web_sm", disable=["ner", "parser"])
+                            self._tts_en_nlp = nlp
+                        except OSError:
+                            self._tts_en_nlp = None
+                            nlp = None
+
+                    if nlp is not None:
+                        doc = nlp(text)
+                        tokens_out = []
+                        for token in doc:
+                            replacement = None
+                            if token.lower_ == "read" and token.pos_ == "VERB" and token.tag_ in {"VBD", "VBN"}:
+                                replacement = "red"
+                            elif token.lower_ == "tear" and token.pos_ == "VERB":
+                                replacement = "tare"
+                            elif token.lower_ == "wind" and token.pos_ == "VERB":
+                                replacement = "wynd"
+                            elif token.lower_ == "minute" and token.pos_ == "ADJ":
+                                replacement = "mynoot"
+                            elif token.lower_ == "bass" and token.pos_ == "ADJ":
+                                replacement = "base"
+                            elif token.lower_ == "live" and token.pos_ == "ADJ":
+                                replacement = "lyve"
+
+                            if replacement is None:
+                                tokens_out.append(token.text_with_ws)
+                            else:
+                                tokens_out.append(_match_case(token.text, replacement) + token.whitespace_)
+                        text = "".join(tokens_out)
+                except Exception as exc:
+                    print(f"Chunk-level homograph polish skipped: {exc}")
+
+            text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+            text = re.sub(r" {2,}", " ", text)
+            return text.strip()
+
+        # Boundary types — used later during stitching to pick the right gap length.
+        _BOUNDARY_PARAGRAPH = "paragraph"
+        _BOUNDARY_SENTENCE  = "sentence"
+        _BOUNDARY_CLAUSE    = "clause"
+
+        _CLAUSE_RE = re.compile(r"[,;:\u2013\u2014]$")  # , ; : – —
+
+        def _word_count(s: str) -> int:
+            return len(s.split())
+
+        def _chunk_text(text: str, max_words: int, short_threshold: int) -> list[tuple[str, str]]:
+            """
+            Split *text* into (chunk_text, boundary_type) pairs.
+
+            boundary_type is the boundary that *follows* the chunk:
+              - 'paragraph' : chunk ends at a blank-line paragraph break
+              - 'sentence'  : chunk ends at a sentence boundary (. ! ?)
+              - 'clause'    : chunk ends at a clause boundary (, ; : – —)
+
+            Strategy:
+              1. Split on paragraph breaks first.
+              2. Within each paragraph use pysbd for sentence boundaries.
+              3. Merge consecutive sentences until max_words would be exceeded.
+              4. Merge very-short isolated sentences (≤ short_threshold words)
+                 with their neighbor so TTS gets enough context.
+              5. If a single sentence exceeds max_words, split on clause
+                 boundaries or, as a last resort, on word boundaries near
+                 the middle of the sentence.
+            """
+            segmenter = pysbd.Segmenter(language="en", clean=False)
+            result: list[tuple[str, str]] = []
+
+            # Step 1 – paragraph split (two or more newlines)
+            paragraphs = re.split(r"\n{2,}", text.strip())
+
+            for para_idx, para in enumerate(paragraphs):
+                para = " ".join(para.split())
+                if not para:
+                    continue
+
+                # Step 2 – sentence segmentation inside paragraph
+                raw_sentences = [s.strip() for s in segmenter.segment(para) if s.strip()]
+
+                # Step 3 – greedy merge: accumulate sentences until max_words
+                # Each item: (text, boundary_type)
+                groups: list[tuple[str, str]] = []
+                buf = ""
+                for i, sent in enumerate(raw_sentences):
+                    is_last = (i == len(raw_sentences) - 1)
+                    candidate = (buf + " " + sent).strip() if buf else sent
+                    if _word_count(candidate) <= max_words:
+                        buf = candidate
+                    else:
+                        if buf:
+                            # Determine trailing boundary type of what we're flushing
+                            btype = _BOUNDARY_CLAUSE if _CLAUSE_RE.search(buf.rstrip()) else _BOUNDARY_SENTENCE
+                            groups.append((buf, btype))
+                        buf = sent
+                if buf:
+                    btype = _BOUNDARY_PARAGRAPH if not is_last else _BOUNDARY_PARAGRAPH
+                    groups.append((buf, _BOUNDARY_PARAGRAPH if para_idx < len(paragraphs) - 1 else _BOUNDARY_SENTENCE))
+
+                # Step 4 – merge short sentences with a neighbor
+                merged: list[tuple[str, str]] = []
+                for text_g, btype_g in groups:
+                    if merged and _word_count(text_g) <= short_threshold:
+                        prev_text, prev_btype = merged[-1]
+                        candidate = prev_text + " " + text_g
+                        if _word_count(candidate) <= max_words:
+                            # absorb into previous, keep previous boundary or upgrade
+                            merged[-1] = (candidate, btype_g)
+                            continue
+                    merged.append((text_g, btype_g))
+
+                # Second pass: try merging short groups with next neighbor
+                merged2: list[tuple[str, str]] = []
+                i = 0
+                while i < len(merged):
+                    text_g, btype_g = merged[i]
+                    if _word_count(text_g) <= short_threshold and i + 1 < len(merged):
+                        next_text, next_btype = merged[i + 1]
+                        candidate = text_g + " " + next_text
+                        if _word_count(candidate) <= max_words:
+                            merged2.append((candidate, next_btype))
+                            i += 2
+                            continue
+                    merged2.append((text_g, btype_g))
+                    i += 1
+                merged = merged2
+
+                # Step 5 – split any group that still exceeds max_words
+                final_para: list[tuple[str, str]] = []
+                for text_g, btype_g in merged:
+                    if _word_count(text_g) <= max_words:
+                        final_para.append((text_g, btype_g))
+                        continue
+                    # Try clause boundaries first
+                    clause_parts = re.split(r"(?<=[,;:\u2013\u2014])\s+", text_g)
+                    sub_buf = ""
+                    for j, part in enumerate(clause_parts):
+                        candidate = (sub_buf + " " + part).strip() if sub_buf else part
+                        if _word_count(candidate) <= max_words:
+                            sub_buf = candidate
+                        else:
+                            if sub_buf:
+                                final_para.append((sub_buf, _BOUNDARY_CLAUSE))
+                            sub_buf = part
+                        if j == len(clause_parts) - 1 and sub_buf:
+                            # Last part carries the original boundary type
+                            if _word_count(sub_buf) <= max_words:
+                                final_para.append((sub_buf, btype_g))
+                            else:
+                                # Hard word-boundary split near the middle
+                                words = sub_buf.split()
+                                half = max(1, len(words) // 2)
+                                final_para.append((" ".join(words[:half]), _BOUNDARY_CLAUSE))
+                                final_para.append((" ".join(words[half:]), btype_g))
+                            sub_buf = ""
+                result.extend(final_para)
+
+            return result
+
+        def _normalize_wavs(wavs_obj):
+            """Normalize model output into a list of 1-D numpy arrays."""
+            if isinstance(wavs_obj, np.ndarray):
+                if wavs_obj.ndim == 1:
+                    return [wavs_obj]
+                if wavs_obj.ndim == 2:
+                    return [wavs_obj[i] for i in range(wavs_obj.shape[0])]
+            if isinstance(wavs_obj, (list, tuple)):
+                return list(wavs_obj)
+            raise TypeError(f"Unexpected wav output type: {type(wavs_obj)}")
+
+        def _rms_frames(wav: np.ndarray, frame_len: int, hop_len: int) -> np.ndarray:
+            """Compute per-frame RMS energy."""
+            import librosa
+            return librosa.feature.rms(y=wav, frame_length=frame_len, hop_length=hop_len)[0]
+
+        def _trim_chunk_edges(wav: np.ndarray, sr: int) -> np.ndarray:
+            """Trim near-silent edges using peak-relative RMS (adapts to voice loudness)."""
+            import librosa
+            if wav.size == 0:
+                return wav
+
+            max_trim_samples = int((TTS_EDGE_TRIM_MS / 1000.0) * sr)
+            if max_trim_samples <= 0:
+                return wav
+
+            frame_len = int(0.030 * sr)   # 30ms frames
+            hop_len   = int(0.010 * sr)   # 10ms hop
+
+            try:
+                rms = _rms_frames(wav, frame_len, hop_len)
+                peak_rms = float(np.max(rms))
+                if peak_rms == 0:
+                    return wav
+                threshold = peak_rms * (10 ** (TTS_EDGE_SILENCE_THRESHOLD_DB / 20.0))
+
+                # Left trim
+                max_trim_frames = int(max_trim_samples / hop_len)
+                left_frames = rms[:max_trim_frames]
+                above = np.where(left_frames > threshold)[0]
+                trim_left_frames = int(above[0]) if above.size else 0
+                trim_left = trim_left_frames * hop_len
+
+                # Right trim (reverse the tail)
+                right_frames = rms[-max_trim_frames:]
+                above_r = np.where(right_frames > threshold)[0]
+                trim_right_frames = (len(right_frames) - int(above_r[-1]) - 1) if above_r.size else 0
+                trim_right = trim_right_frames * hop_len
+
+                if trim_left + trim_right >= wav.size:
+                    return wav
+                end = wav.size - trim_right if trim_right > 0 else wav.size
+                return wav[trim_left:end]
+            except Exception:
+                return wav
+
+        def _limit_silence_gaps(wav: np.ndarray, sr: int, max_silence_ms: int) -> np.ndarray:
+            """Cap any internal silence longer than max_silence_ms to that duration."""
+            import librosa
+            if wav.size == 0 or max_silence_ms <= 0:
+                return wav
+
+            frame_len = int(0.030 * sr)
+            hop_len   = int(0.010 * sr)
+
+            try:
+                rms = _rms_frames(wav, frame_len, hop_len)
+                peak_rms = float(np.max(rms))
+                if peak_rms == 0:
+                    return wav
+                threshold = peak_rms * (10 ** (TTS_EDGE_SILENCE_THRESHOLD_DB / 20.0))
+
+                min_sil_frames = max_silence_ms / 10  # hop is 10ms
+                is_silent = np.concatenate(([False], rms < threshold, [False]))
+                diff = np.diff(is_silent.astype(int))
+                starts = np.where(diff == 1)[0]
+                ends   = np.where(diff == -1)[0]
+
+                # Collect silence segments that exceed the limit
+                excess: list[tuple[int,int,int]] = []  # (sample_start, sample_end, keep_samples)
+                for s, e in zip(starts, ends):
+                    dur_frames = e - s
+                    if dur_frames > min_sil_frames:
+                        s_sample = int(librosa.frames_to_time(s, sr=sr, hop_length=hop_len) * sr)
+                        e_sample = int(librosa.frames_to_time(e, sr=sr, hop_length=hop_len) * sr)
+                        s_sample = max(0, min(s_sample, wav.size))
+                        e_sample = max(0, min(e_sample, wav.size))
+                        keep = int((max_silence_ms / 1000.0) * sr)
+                        excess.append((s_sample, e_sample, keep))
+
+                if not excess:
+                    return wav
+
+                # Rebuild audio, trimming each excess silence to keep_samples centred
+                pieces: list[np.ndarray] = []
+                prev = 0
+                for (s_samp, e_samp, keep) in excess:
+                    pieces.append(wav[prev:s_samp])
+                    mid = (s_samp + e_samp) // 2
+                    half = keep // 2
+                    pieces.append(wav[max(0, mid-half):min(wav.size, mid+half)])
+                    prev = e_samp
+                pieces.append(wav[prev:])
+                return np.concatenate([p for p in pieces if p.size > 0])
+            except Exception:
+                return wav
 
         ref_audio_path = None
         try:
@@ -1045,25 +1737,129 @@ class Qwen3TTSVoiceCloner:
 
             print(f"Generating voice clone for {len(target_text)} chars in {language}...")
 
+            # Stage 1: document preparation before chunking.
+            target_text = _prepare_text_for_tts_document(target_text, language)
+            print(f"Text after document prep: {len(target_text)} chars")
+
+            if TTS_ENABLE_CHUNKING:
+                tagged_chunks = _chunk_text(target_text, TTS_CHUNK_MAX_WORDS, TTS_SHORT_SENTENCE_WORDS)
+            else:
+                tagged_chunks = [(" ".join(target_text.split()), _BOUNDARY_SENTENCE)]
+
+            # Stage 2: chunk-local polish right before inference.
+            chunks = [_polish_tts_chunk_text(c, language) for c, _ in tagged_chunks]
+            boundaries = [b for _, b in tagged_chunks]
+
+            batch_size = max(1, TTS_BATCH_SIZE if TTS_ENABLE_BATCHING else 1)
+            print(
+                "TTS chunking config: "
+                f"enabled={TTS_ENABLE_CHUNKING}, "
+                f"chunks={len(chunks)}, "
+                f"max_words={TTS_CHUNK_MAX_WORDS}, "
+                f"batching={TTS_ENABLE_BATCHING}, "
+                f"batch_size={batch_size}"
+            )
+
             # Inference mode avoids autograd overhead and keeps output quality unchanged.
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             t_infer_start = time.perf_counter()
             with torch.inference_mode():
-                wavs, sr = self.model.generate_voice_clone(
-                    text=target_text,
-                    language=language,
-                    ref_audio=ref_audio_path,
-                    ref_text=ref_text,
-                )
+                all_wavs = []
+                sr = None
+                batched_requests = 0
+                batch_fallbacks = 0
+                for i in range(0, len(chunks), batch_size):
+                    batch_texts = chunks[i:i + batch_size]
+                    if TTS_ENABLE_BATCHING and len(batch_texts) > 1:
+                        try:
+                            batched_requests += 1
+                            batch_wavs_obj, batch_sr = self.model.generate_voice_clone(
+                                text=batch_texts,
+                                language=language,
+                                ref_audio=ref_audio_path,
+                                ref_text=ref_text,
+                            )
+                            batch_wavs = _normalize_wavs(batch_wavs_obj)
+                            if len(batch_wavs) != len(batch_texts):
+                                raise ValueError(
+                                    f"Expected {len(batch_texts)} wavs from batched call, got {len(batch_wavs)}"
+                                )
+                            all_wavs.extend(batch_wavs)
+                            sr = sr or batch_sr
+                            continue
+                        except Exception as batch_error:
+                            batch_fallbacks += 1
+                            print(
+                                "Batched Qwen generation unavailable for this request; "
+                                f"falling back to per-chunk calls ({batch_error})"
+                            )
+
+                    # Safe fallback: synthesize each chunk independently.
+                    for chunk_text in batch_texts:
+                        chunk_wavs_obj, chunk_sr = self.model.generate_voice_clone(
+                            text=chunk_text,
+                            language=language,
+                            ref_audio=ref_audio_path,
+                            ref_text=ref_text,
+                        )
+                        chunk_wavs = _normalize_wavs(chunk_wavs_obj)
+                        all_wavs.append(chunk_wavs[0])
+                        sr = sr or chunk_sr
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             t_infer = time.perf_counter() - t_infer_start
 
+            # Join chunk audio with a small gap to avoid hard boundaries between chunks.
+            if not all_wavs:
+                raise RuntimeError("TTS generation returned no audio chunks")
+            if len(all_wavs) == 1:
+                final_wav = all_wavs[0]
+                # Still apply silence gap limiting and edge trim on single chunk
+                final_wav = _limit_silence_gaps(final_wav, sr, TTS_SILENCE_GAP_LIMIT_MS)
+                final_wav = _trim_chunk_edges(final_wav, sr)
+            else:
+                # Per-chunk: limit internal silence gaps, then trim edges
+                all_wavs = [_limit_silence_gaps(w, sr, TTS_SILENCE_GAP_LIMIT_MS) for w in all_wavs]
+                all_wavs = [_trim_chunk_edges(wav_chunk, sr) for wav_chunk in all_wavs]
+                dtype = all_wavs[0].dtype
+                def _gap(ms: int) -> np.ndarray:
+                    samples = int((ms / 1000.0) * sr)
+                    return np.zeros(samples, dtype=dtype) if samples > 0 else np.zeros(0, dtype=dtype)
+                gap_for = {
+                    _BOUNDARY_PARAGRAPH: _gap(TTS_GAP_PARAGRAPH_MS),
+                    _BOUNDARY_SENTENCE:  _gap(TTS_GAP_SENTENCE_MS),
+                    _BOUNDARY_CLAUSE:    _gap(TTS_GAP_CLAUSE_MS),
+                }
+                stitched_parts = []
+                for idx, wav_chunk in enumerate(all_wavs):
+                    stitched_parts.append(wav_chunk)
+                    if idx < len(all_wavs) - 1:
+                        # The boundary that follows chunk `idx` is `boundaries[idx]`
+                        btype = boundaries[idx] if idx < len(boundaries) else _BOUNDARY_SENTENCE
+                        g = gap_for.get(btype, gap_for[_BOUNDARY_SENTENCE])
+                        if g.size > 0:
+                            stitched_parts.append(g)
+                final_wav = np.concatenate(stitched_parts)
+
             # Serialize directly to memory to avoid extra disk write/read.
             t_serialize_start = time.perf_counter()
+
+            # Loudness normalization: target TTS_LUFS_TARGET LUFS
+            try:
+                import pyloudnorm as pyln
+                meter = pyln.Meter(sr)
+                loudness = meter.integrated_loudness(final_wav.astype(np.float64))
+                if np.isfinite(loudness):
+                    final_wav = pyln.normalize.loudness(
+                        final_wav.astype(np.float64), loudness, TTS_LUFS_TARGET
+                    ).astype(final_wav.dtype)
+                    print(f"Loudness normalized: {loudness:.1f} LUFS → {TTS_LUFS_TARGET} LUFS")
+            except Exception as e:
+                print(f"Loudness normalization skipped: {e}")
+
             wav_buffer = io.BytesIO()
-            sf.write(wav_buffer, wavs[0], sr, format="WAV")
+            sf.write(wav_buffer, final_wav, sr, format="WAV")
             audio_bytes = wav_buffer.getvalue()
             t_serialize = time.perf_counter() - t_serialize_start
 
@@ -1075,7 +1871,9 @@ class Qwen3TTSVoiceCloner:
 
             generation_time = time.time() - start_time
             t_total = time.perf_counter() - t0
-            duration = len(wavs[0]) / sr
+            duration = len(final_wav) / sr
+            rtf = t_infer / duration if duration > 0 else float("inf")
+            x_realtime = duration / t_infer if t_infer > 0 else float("inf")
 
             print(f"Voice clone generated in {generation_time:.2f}s, duration: {duration:.2f}s")
             print(
@@ -1085,6 +1883,14 @@ class Qwen3TTSVoiceCloner:
                 f"serialize={t_serialize:.3f}s, "
                 f"cleanup={t_cleanup:.3f}s, "
                 f"total={t_total:.3f}s"
+            )
+            print(
+                "TTS performance: "
+                f"rtf={rtf:.3f}, "
+                f"x_realtime={x_realtime:.2f}x, "
+                f"chunks={len(chunks)}, "
+                f"batched_requests={batched_requests}, "
+                f"batch_fallbacks={batch_fallbacks}"
             )
 
             return {

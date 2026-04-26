@@ -2,6 +2,7 @@
 
 import re
 import sys
+import logging
 from pathlib import Path
 from typing import Optional
 import asyncio
@@ -36,6 +37,8 @@ from api.models import (
 )
 from api.streaming import transcription_event_stream
 from utils.audio import validate_audio_file, AudioValidationError
+
+logger = logging.getLogger("transcodio.api")
 
 # --- Rate Limiter ---
 limiter = Limiter(key_func=get_remote_address)
@@ -342,10 +345,19 @@ async def transcribe_audio_stream(
         # Clean up expired entries
         cleanup_expired_audio()
 
+        logger.info(
+            "stream request accepted session_id=%s filename=%s size_bytes=%s duration_s=%.2f diarization=%s minutes=%s",
+            session_id,
+            safe_filename,
+            file_size,
+            duration,
+            enable_diarization,
+            enable_minutes,
+        )
+
         # Import Modal and lookup function
         try:
             import modal
-            import json
 
             # Lookup the deployed class
             STTModel = modal.Cls.from_name(config.MODAL_APP_NAME, "ParakeetSTTModel")
@@ -360,7 +372,15 @@ async def transcribe_audio_stream(
         async def event_generator():
             try:
                 import json
-                print("Starting stream generation...")
+
+                progress_log_step_pct = 10
+                progress_log_every_seconds = 8.0
+                stream_started_at = time.perf_counter()
+                last_progress_log_at = stream_started_at
+                last_progress_bucket = -1
+                yielded_segments = 0
+
+                logger.info("stream started session_id=%s", session_id)
 
                 # Accumulate segments for diarization
                 segments_data = []
@@ -368,12 +388,16 @@ async def transcribe_audio_stream(
 
                 async for segment_json in model.transcribe_stream.remote_gen.aio(preprocessed_bytes, duration):
                     # Parse and yield as SSE event
-                    print(f"Received segment: {segment_json[:100] if len(segment_json) > 100 else segment_json}...")
                     segment_data = json.loads(segment_json)
                     event_type = segment_data.get("type", "unknown")
-                    print(f"Event type: {event_type}")
 
                     if event_type == "metadata":
+                        logger.info(
+                            "stream metadata session_id=%s language=%s duration_s=%.2f",
+                            session_id,
+                            segment_data.get("language"),
+                            float(segment_data.get("duration") or 0.0),
+                        )
                         yield {
                             "event": "metadata",
                             "data": json.dumps({
@@ -390,6 +414,25 @@ async def transcribe_audio_stream(
                             "end": segment_data.get("end"),
                             "text": segment_data.get("text"),
                         })
+                        yielded_segments += 1
+
+                        # Throttled progress logging: emit at 10% buckets or every N seconds.
+                        seg_end = float(segment_data.get("end") or 0.0)
+                        total_duration = duration if duration > 0 else 1.0
+                        progress_pct = max(0.0, min(100.0, (seg_end / total_duration) * 100.0))
+                        progress_bucket = int(progress_pct // progress_log_step_pct)
+                        now = time.perf_counter()
+                        time_due = (now - last_progress_log_at) >= progress_log_every_seconds
+                        bucket_due = progress_bucket > last_progress_bucket
+                        if time_due or bucket_due:
+                            logger.info(
+                                "stream progress session_id=%s segments=%s progress=%.1f%%",
+                                session_id,
+                                yielded_segments,
+                                progress_pct,
+                            )
+                            last_progress_log_at = now
+                            last_progress_bucket = progress_bucket
 
                         yield {
                             "event": "progress",
@@ -403,11 +446,19 @@ async def transcribe_audio_stream(
 
                     elif event_type == "complete":
                         full_text = segment_data.get("text", "")
+                        elapsed = time.perf_counter() - stream_started_at
+                        logger.info(
+                            "stream complete session_id=%s segments=%s elapsed_s=%.2f text_chars=%s",
+                            session_id,
+                            yielded_segments,
+                            elapsed,
+                            len(full_text),
+                        )
 
                         # Run speaker diarization if enabled and there are segments
                         if enable_diarization and config.ENABLE_SPEAKER_DIARIZATION and segments_data:
                             try:
-                                print("Running speaker diarization...")
+                                logger.info("diarization started session_id=%s", session_id)
                                 # Import diarizer from Modal
                                 Diarizer = modal.Cls.from_name(config.MODAL_APP_NAME, "SpeakerDiarizerModel")
                                 diarizer = Diarizer()
@@ -434,13 +485,15 @@ async def transcribe_audio_stream(
                                         "data": json.dumps({"segments": segments_with_speakers})
                                     }
 
-                                    print(f"Speaker diarization complete: {len(speaker_timeline)} speaker segments")
+                                    logger.info(
+                                        "diarization complete session_id=%s speaker_segments=%s",
+                                        session_id,
+                                        len(speaker_timeline),
+                                    )
                                 else:
-                                    print("Diarization returned no speaker segments")
+                                    logger.info("diarization empty result session_id=%s", session_id)
                             except Exception as e:
-                                print(f"Diarization failed (non-fatal): {e}")
-                                import traceback
-                                traceback.print_exc()
+                                logger.exception("diarization failed session_id=%s", session_id)
                                 # Continue without speaker labels
 
                         # Yield completion event
@@ -455,7 +508,7 @@ async def transcribe_audio_stream(
                         # Generate meeting minutes if enabled
                         if enable_minutes and config.ENABLE_MEETING_MINUTES and full_text:
                             try:
-                                print("Generating meeting minutes...")
+                                logger.info("minutes generation started session_id=%s", session_id)
                                 # Import minutes generator from Modal
                                 MinutesGenerator = modal.Cls.from_name(
                                     config.MODAL_APP_NAME, "MeetingMinutesGenerator"
@@ -475,9 +528,13 @@ async def transcribe_audio_stream(
                                             "minutes": minutes_result.get("minutes", {})
                                         })
                                     }
-                                    print("Meeting minutes generated successfully")
+                                    logger.info("minutes generation complete session_id=%s", session_id)
                                 else:
-                                    print(f"Minutes generation failed: {minutes_result.get('error')}")
+                                    logger.warning(
+                                        "minutes generation failed session_id=%s error=%s",
+                                        session_id,
+                                        minutes_result.get("error"),
+                                    )
                                     yield {
                                         "event": "minutes_error",
                                         "data": json.dumps({
@@ -485,9 +542,7 @@ async def transcribe_audio_stream(
                                         })
                                     }
                             except Exception as e:
-                                print(f"Minutes generation failed (non-fatal): {e}")
-                                import traceback
-                                traceback.print_exc()
+                                logger.exception("minutes generation exception session_id=%s", session_id)
                                 yield {
                                     "event": "minutes_error",
                                     "data": json.dumps({
@@ -496,6 +551,11 @@ async def transcribe_audio_stream(
                                 }
 
                     elif event_type == "error":
+                        logger.warning(
+                            "stream model error session_id=%s error=%s",
+                            session_id,
+                            segment_data.get("error"),
+                        )
                         yield {
                             "event": "error",
                             "data": json.dumps({
@@ -504,8 +564,7 @@ async def transcribe_audio_stream(
                         }
 
             except Exception as e:
-                import traceback
-                traceback.print_exc()
+                logger.exception("stream event generator failed session_id=%s", session_id)
                 yield {
                     "event": "error",
                     "data": json.dumps({

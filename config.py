@@ -118,6 +118,19 @@ MINUTES_CONTAINER_IDLE_TIMEOUT = 60  # 1 minute (shorter than STT since less fre
 ENABLE_VOICE_CLONING = True
 TTS_CONTAINER_IDLE_TIMEOUT = 20
 TTS_TIMEOUT = 900  # 15 minutes max per synthesis request
+TTS_ENABLE_CHUNKING = True
+TTS_CHUNK_MAX_WORDS = 80          # max words per chunk (pysbd-based splitting)
+TTS_SHORT_SENTENCE_WORDS = 3      # sentences <= this get merged with a neighbor
+TTS_ENABLE_BATCHING = True
+TTS_BATCH_SIZE = 8
+# Gap inserted between stitched chunks based on the boundary type
+TTS_GAP_PARAGRAPH_MS = 400        # blank line / paragraph break
+TTS_GAP_SENTENCE_MS = 180         # sentence-end punctuation (. ! ?)
+TTS_GAP_CLAUSE_MS = 60            # clause boundary (, ; : – —)
+TTS_EDGE_TRIM_MS = 120
+TTS_EDGE_SILENCE_THRESHOLD_DB = -42.0   # dB below peak RMS for edge trim
+TTS_SILENCE_GAP_LIMIT_MS = 500          # cap any internal silence gap longer than this
+TTS_LUFS_TARGET = -18.0                 # loudness normalization target (LUFS)
 
 # Available TTS Models
 TTS_MODELS = {
