@@ -298,7 +298,6 @@ async def transcribe_audio_stream(
     request: Request,
     file: UploadFile = File(..., description="Audio file to transcribe"),
     enable_diarization: bool = Form(default=False, description="Enable speaker diarization"),
-    enable_minutes: bool = Form(default=False, description="Generate meeting minutes"),
 ):
     """
     Transcribe an audio file with streaming results via Server-Sent Events.
@@ -306,7 +305,6 @@ async def transcribe_audio_stream(
     Args:
         file: Uploaded audio file
         enable_diarization: Whether to identify speakers in the audio
-        enable_minutes: Whether to generate meeting minutes after transcription
 
     Returns:
         SSE stream of transcription segments
@@ -346,13 +344,12 @@ async def transcribe_audio_stream(
         cleanup_expired_audio()
 
         logger.info(
-            "stream request accepted session_id=%s filename=%s size_bytes=%s duration_s=%.2f diarization=%s minutes=%s",
+            "stream request accepted session_id=%s filename=%s size_bytes=%s duration_s=%.2f diarization=%s",
             session_id,
             safe_filename,
             file_size,
             duration,
             enable_diarization,
-            enable_minutes,
         )
 
         # Import Modal and lookup function
@@ -504,51 +501,6 @@ async def transcribe_audio_stream(
                                 "audio_session_id": session_id,
                             })
                         }
-
-                        # Generate meeting minutes if enabled
-                        if enable_minutes and config.ENABLE_MEETING_MINUTES and full_text:
-                            try:
-                                logger.info("minutes generation started session_id=%s", session_id)
-                                # Import minutes generator from Modal
-                                MinutesGenerator = modal.Cls.from_name(
-                                    config.MODAL_APP_NAME, "MeetingMinutesGenerator"
-                                )
-                                generator = MinutesGenerator()
-
-                                # Generate minutes
-                                minutes_result = await generator.generate_minutes.remote.aio(
-                                    full_text,
-                                    segments_data if segments_data else None
-                                )
-
-                                if minutes_result.get("success"):
-                                    yield {
-                                        "event": "minutes_ready",
-                                        "data": json.dumps({
-                                            "minutes": minutes_result.get("minutes", {})
-                                        })
-                                    }
-                                    logger.info("minutes generation complete session_id=%s", session_id)
-                                else:
-                                    logger.warning(
-                                        "minutes generation failed session_id=%s error=%s",
-                                        session_id,
-                                        minutes_result.get("error"),
-                                    )
-                                    yield {
-                                        "event": "minutes_error",
-                                        "data": json.dumps({
-                                            "error": minutes_result.get("error", "Unknown error")
-                                        })
-                                    }
-                            except Exception as e:
-                                logger.exception("minutes generation exception session_id=%s", session_id)
-                                yield {
-                                    "event": "minutes_error",
-                                    "data": json.dumps({
-                                        "error": str(e)
-                                    })
-                                }
 
                     elif event_type == "error":
                         logger.warning(

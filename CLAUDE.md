@@ -9,7 +9,7 @@ Transcodio is a production-ready AI platform deployed on Modal's serverless GPU 
 Key features:
 - **Real progressive streaming** transcription with silence detection (yields segments as they complete)
 - **Speaker diarization** using NVIDIA TitaNet for automatic speaker identification
-- **Meeting minutes** generation using Anthropic Claude Haiku 4.5
+- **Meeting minutes** are not part of the current repo. They may be added back later, likely with a different LLM/provider.
 - **Voice cloning** using Qwen3-TTS with saved voice profiles and 10 language support
 - **Saved voices** with persistent storage in Modal Volume
 - **Image generation** using FLUX.1-schnell model for text-to-image
@@ -28,7 +28,7 @@ The application has a three-tier architecture:
 
 1. **Frontend (static/)**: Browser-based UI with three modes — Transcription, Voice Cloning, Image Generation. Supports English (default) and Spanish via i18n system
 2. **API Layer (api/)**: FastAPI application handling uploads, validation, SSE streaming, and session caching
-3. **GPU Backend (modal_app/)**: Modal serverless functions with 6 classes across 4 container images
+3. **GPU Backend (modal_app/)**: Modal serverless functions for transcription, diarization, voice cloning, storage, and image generation. Historical notes below may still mention an older meeting-minutes implementation that is no longer active in this repo.
 
 Data flow:
 ```
@@ -37,7 +37,7 @@ User uploads audio → FastAPI validates/preprocesses → Modal GPU processes �
 
 ### Key Components
 
-**modal_app/app.py** — 6 Modal classes across 4 container images:
+**modal_app/app.py** — current Modal classes plus some historical notes in this document:
 
 | Class | Image | GPU | Timeout | Purpose |
 |-------|-------|-----|---------|---------|
@@ -46,7 +46,8 @@ User uploads audio → FastAPI validates/preprocesses → Modal GPU processes �
 | `VoiceStorage` | `debian_slim` (no GPU) | — | 60s | Persistent voice profile management |
 | `Qwen3TTSVoiceCloner` | `qwen_tts_image` (CUDA 12.8 + pinned Qwen3-TTS source build) | L4 | 300s | Voice cloning and synthesis |
 | `FluxImageGenerator` | `flux_image` (CUDA 12.8 + diffusers) | L4 | 600s | Text-to-image generation |
-| `MeetingMinutesGenerator` | `anthropic_image` (debian_slim) | — | 120s | Meeting minutes via Claude API |
+
+Note: `MeetingMinutesGenerator` and the Anthropic-based minutes flow were removed from the current codebase. If meeting minutes return later, they will likely be implemented with a different LLM/provider.
 
 Key implementation details:
 - **Embedded configuration**: All Modal-specific settings are embedded directly at the top of the file (not imported from config.py) to avoid import issues in Modal containers
@@ -56,7 +57,6 @@ Key implementation details:
 - **VoiceStorage**: Manages voice profiles on Modal Volume at `/models/voices/`. Methods: `list_voices()`, `get_voice()`, `save_voice()`, `delete_voice()`. All methods validate `voice_id` as UUID format and verify resolved paths stay within the voices directory (path traversal protection).
 - **Qwen3TTSVoiceCloner**: Loads `Qwen/Qwen3-TTS-12Hz-1.7B-Base` with bfloat16 on CUDA. Method: `generate_voice_clone(ref_audio_bytes, ref_text, target_text, language)`
 - **FluxImageGenerator**: FLUX.1-schnell with sequential CPU offload. Requires `hf-token` Modal secret. Method: `generate_image(prompt, width, height, num_inference_steps, guidance_scale)`
-- **MeetingMinutesGenerator**: Claude Haiku 4.5 API. Requires `anthropic-api-key` Modal secret. Spanish-language prompts with date awareness. Method: `generate_minutes(transcription, speakers)`
 - **NoStdStreams** context manager suppresses NeMo's verbose logging
 - **`align_speakers_to_segments()`** function maps speaker labels to transcription segments based on maximum temporal overlap
 - Uses Modal Volume at `/models` to cache all models (Parakeet, TitaNet, Qwen3-TTS, FLUX.1-schnell)
@@ -69,7 +69,7 @@ Key implementation details:
 | GET | `/` | Serve web UI (index.html) |
 | GET | `/health` | Health check |
 | POST | `/api/transcribe` | Non-streaming transcription |
-| POST | `/api/transcribe/stream` | Streaming transcription (SSE) with optional diarization & minutes |
+| POST | `/api/transcribe/stream` | Streaming transcription (SSE) with optional diarization |
 | GET | `/api/audio/{session_id}` | Retrieve cached audio for playback |
 | POST | `/api/voice-clone` | Clone voice and synthesize text (single-shot) |
 | GET | `/api/voices` | List all saved voice profiles |
@@ -85,7 +85,6 @@ Key implementation details:
 - Audio validation happens before sending to Modal to save GPU costs
 - SSE streaming converts Modal's synchronous generator to async via `event_generator()`
 - Speaker diarization runs after transcription completes, yields `speakers_ready` event
-- Meeting minutes run after completion, yields `minutes_ready` or `minutes_error` event
 - Voice clone endpoint supports model selection via `tts_model` param (currently only `qwen`)
 - Reference audio preprocessing converts to 24kHz mono WAV for TTS (vs 16kHz for STT)
 - **Security**: API key auth via `X-API-Key` header, rate limiting via `slowapi`, security response headers (CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy), filename sanitization for Content-Disposition, UUID validation on all path parameters, generic error messages (no internal detail leakage)
@@ -409,7 +408,9 @@ After changing settings, redeploy: `py -m modal deploy modal_app/app.py`
 
 ### Meeting Minutes Generation
 
-Uses Anthropic Claude Haiku 4.5 API to generate structured meeting minutes in Spanish.
+This feature is not part of the current repo. The notes below are historical context only.
+
+If meeting minutes are added back later, they will likely use a different LLM/provider rather than the previous Anthropic Claude Haiku implementation.
 
 **How it works:**
 1. Transcription completes → full text sent to Claude Haiku 4.5

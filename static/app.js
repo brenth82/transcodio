@@ -14,7 +14,6 @@ const translations = {
         'upload.subtitle': 'or click to select',
         'upload.file_info': 'Supports MP3, WAV, M4A, FLAC, OGG \u2022 Max 100MB \u2022 Up to 60 minutes',
         'upload.identify_speakers': 'Identify speakers',
-        'upload.generate_minutes': 'Generate meeting minutes',
 
         // Processing section
         'processing.title': 'Transcribing your audio...',
@@ -26,34 +25,6 @@ const translations = {
         'results.title': 'Transcription Results',
         'results.new_transcription': 'New Transcription',
         'results.tab_transcription': 'Transcription',
-        'results.tab_minutes': 'Minutes',
-
-        // Minutes section
-        'minutes.title': 'Meeting Minutes',
-        'minutes.download': 'Download Minutes',
-        'minutes.loading': 'Generating meeting minutes...',
-        'minutes.executive_summary': 'Executive Summary',
-        'minutes.key_points': 'Key Discussion Points',
-        'minutes.decisions': 'Decisions Made',
-        'minutes.action_items': 'Action Items',
-        'minutes.participants': 'Participants Mentioned',
-        'minutes.no_summary': 'No summary available.',
-        'minutes.no_key_points': 'No key points identified.',
-        'minutes.no_decisions': 'No decisions recorded.',
-        'minutes.no_task': 'No task specified',
-        'minutes.assignee_label': 'Assignee:',
-        'minutes.unassigned': 'Unassigned',
-        'minutes.date_label': 'Date:',
-        'minutes.date_tbd': 'TBD',
-        'minutes.no_actions': 'No pending actions identified.',
-        'minutes.no_participants': 'No participants mentioned by name.',
-        'minutes.could_not_generate': 'Could not generate minutes. ',
-        'minutes.download_header': 'MEETING MINUTES',
-        'minutes.download_executive_summary': 'EXECUTIVE SUMMARY',
-        'minutes.download_key_points': 'KEY DISCUSSION POINTS',
-        'minutes.download_decisions': 'DECISIONS MADE',
-        'minutes.download_actions': 'ACTION ITEMS',
-        'minutes.download_participants': 'PARTICIPANTS MENTIONED',
 
         // Voice clone section
         'voice.title': 'Clone Voice',
@@ -126,14 +97,10 @@ const translations = {
         'toast.file_too_large': 'File exceeds 100MB limit',
         'toast.speakers_done': 'Speaker identification completed',
         'toast.transcription_done': 'Transcription completed!',
-        'toast.minutes_done': 'Minutes generated!',
-        'toast.minutes_error': 'Error generating minutes',
         'toast.downloaded': 'Downloaded!',
         'toast.no_transcription_data': 'No transcription data available',
         'toast.srt_downloaded': 'SRT downloaded!',
         'toast.vtt_downloaded': 'VTT downloaded!',
-        'toast.no_minutes': 'No minutes available',
-        'toast.minutes_downloaded': 'Minutes downloaded!',
         'toast.ref_audio_invalid': 'Please upload a valid audio file',
         'toast.ref_audio_too_large': 'File is too large. Max 15MB.',
         'toast.no_ref_audio': 'Please upload or record a reference audio',
@@ -182,7 +149,6 @@ const translations = {
         'upload.subtitle': 'o haz clic para seleccionar',
         'upload.file_info': 'Soporta MP3, WAV, M4A, FLAC, OGG \u2022 M\u00e1x 100MB \u2022 Hasta 60 minutos',
         'upload.identify_speakers': 'Identificar hablantes',
-        'upload.generate_minutes': 'Generar minuta de reuni\u00f3n',
 
         // Processing section
         'processing.title': 'Transcribiendo tu audio...',
@@ -194,34 +160,6 @@ const translations = {
         'results.title': 'Resultados de Transcripci\u00f3n',
         'results.new_transcription': 'Nueva Transcripci\u00f3n',
         'results.tab_transcription': 'Transcripci\u00f3n',
-        'results.tab_minutes': 'Minuta',
-
-        // Minutes section
-        'minutes.title': 'Minuta de Reuni\u00f3n',
-        'minutes.download': 'Descargar Minuta',
-        'minutes.loading': 'Generando minuta de reuni\u00f3n...',
-        'minutes.executive_summary': 'Resumen Ejecutivo',
-        'minutes.key_points': 'Puntos Clave Discutidos',
-        'minutes.decisions': 'Decisiones Tomadas',
-        'minutes.action_items': 'Acciones Pendientes',
-        'minutes.participants': 'Participantes Mencionados',
-        'minutes.no_summary': 'No hay resumen disponible.',
-        'minutes.no_key_points': 'No se identificaron puntos clave.',
-        'minutes.no_decisions': 'No se registraron decisiones.',
-        'minutes.no_task': 'Sin tarea especificada',
-        'minutes.assignee_label': 'Responsable:',
-        'minutes.unassigned': 'Sin asignar',
-        'minutes.date_label': 'Fecha:',
-        'minutes.date_tbd': 'Por definir',
-        'minutes.no_actions': 'No se identificaron acciones pendientes.',
-        'minutes.no_participants': 'No se mencionaron participantes por nombre.',
-        'minutes.could_not_generate': 'No se pudo generar la minuta. ',
-        'minutes.download_header': 'MINUTA DE REUNI\u00d3N',
-        'minutes.download_executive_summary': 'RESUMEN EJECUTIVO',
-        'minutes.download_key_points': 'PUNTOS CLAVE DISCUTIDOS',
-        'minutes.download_decisions': 'DECISIONES TOMADAS',
-        'minutes.download_actions': 'ACCIONES PENDIENTES',
-        'minutes.download_participants': 'PARTICIPANTES MENCIONADOS',
 
         // Voice clone section
         'voice.title': 'Clonar Voz',
@@ -294,14 +232,10 @@ const translations = {
         'toast.file_too_large': 'El archivo excede el l\u00edmite de 100MB',
         'toast.speakers_done': 'Identificaci\u00f3n de hablantes completada',
         'toast.transcription_done': 'Transcripci\u00f3n completada!',
-        'toast.minutes_done': 'Minuta generada!',
-        'toast.minutes_error': 'Error al generar la minuta',
         'toast.downloaded': 'Descargado!',
         'toast.no_transcription_data': 'No hay datos de transcripci\u00f3n disponibles',
         'toast.srt_downloaded': 'SRT descargado!',
         'toast.vtt_downloaded': 'VTT descargado!',
-        'toast.no_minutes': 'No hay minuta disponible',
-        'toast.minutes_downloaded': 'Minuta descargada!',
         'toast.ref_audio_invalid': 'Por favor sube un archivo de audio v\u00e1lido',
         'toast.ref_audio_too_large': 'El archivo es demasiado grande. M\u00e1ximo 15MB.',
         'toast.no_ref_audio': 'Por favor sube o graba un audio de referencia',
@@ -391,7 +325,6 @@ const resultsSection = document.getElementById('resultsSection');
 const uploadArea = document.getElementById('uploadArea');
 const fileInput = document.getElementById('fileInput');
 const enableDiarizationCheckbox = document.getElementById('enableDiarization');
-const enableMinutesCheckbox = document.getElementById('enableMinutes');
 const processingStatus = document.getElementById('processingStatus');
 const progressFill = document.getElementById('progressFill');
 const segments = document.getElementById('segments');
@@ -404,22 +337,9 @@ const downloadVttBtn = document.getElementById('downloadVttBtn');
 const newTranscriptionBtn = document.getElementById('newTranscriptionBtn');
 const toast = document.getElementById('toast');
 
-// Minutes elements
-const minutesSection = document.getElementById('minutesSection');
-const minutesLoading = document.getElementById('minutesLoading');
-const minutesContent = document.getElementById('minutesContent');
-const minutesSummary = document.getElementById('minutesSummary');
-const minutesKeyPoints = document.getElementById('minutesKeyPoints');
-const minutesDecisions = document.getElementById('minutesDecisions');
-const minutesActions = document.getElementById('minutesActions');
-const minutesParticipants = document.getElementById('minutesParticipants');
-const downloadMinutesBtn = document.getElementById('downloadMinutesBtn');
-
 // Tab elements
 const tabBtns = document.querySelectorAll('.tab-btn');
 const transcriptionTab = document.getElementById('transcriptionTab');
-const minutesTab = document.getElementById('minutesTab');
-const minutesTabBtn = document.getElementById('minutesTabBtn');
 
 // Mode selector elements
 const transcriptionModeBtn = document.getElementById('transcriptionModeBtn');
@@ -489,7 +409,6 @@ const newImageGenBtn = document.getElementById('newImageGenBtn');
 let currentTranscription = '';
 let currentFile = null;
 let currentSegments = []; // Store segments for subtitle export
-let currentMinutes = null; // Store minutes data
 
 // Voice clone state
 let currentMode = 'transcription';
@@ -538,7 +457,6 @@ function setupEventListeners() {
     downloadBtn.addEventListener('click', downloadTranscription);
     downloadSrtBtn.addEventListener('click', downloadSRT);
     downloadVttBtn.addEventListener('click', downloadVTT);
-    downloadMinutesBtn.addEventListener('click', downloadMinutes);
     newTranscriptionBtn.addEventListener('click', resetApp);
 
     // Tab switching
@@ -615,7 +533,6 @@ function switchTab(tabName) {
 
     // Update tab content visibility
     transcriptionTab.classList.toggle('active', tabName === 'transcription');
-    minutesTab.classList.toggle('active', tabName === 'minutes');
 }
 
 // File Handling
@@ -668,12 +585,10 @@ async function processFile(file) {
 
         // Add options from checkboxes
         const enableDiarization = enableDiarizationCheckbox.checked;
-        const enableMinutes = enableMinutesCheckbox.checked;
         formData.append('enable_diarization', enableDiarization);
-        formData.append('enable_minutes', enableMinutes);
 
         // Upload and transcribe with streaming
-        await transcribeWithStreaming(formData, enableDiarization, enableMinutes);
+        await transcribeWithStreaming(formData, enableDiarization);
 
     } catch (error) {
         console.error('Error:', error);
@@ -701,7 +616,7 @@ function validateFile(file) {
 }
 
 // Transcription with Streaming
-async function transcribeWithStreaming(formData, enableDiarization = false, enableMinutes = false) {
+async function transcribeWithStreaming(formData, enableDiarization = false) {
     processingStatus.textContent = t('processing.starting');
     progressFill.style.width = '20%';
 
@@ -709,26 +624,6 @@ async function transcribeWithStreaming(formData, enableDiarization = false, enab
     segments.innerHTML = '';
     currentTranscription = '';
     currentSegments = [];
-    currentMinutes = null;
-
-    // Reset minutes section
-    minutesLoading.classList.add('hidden');
-    minutesContent.classList.remove('hidden');
-    minutesSummary.textContent = '';
-    minutesKeyPoints.innerHTML = '';
-    minutesDecisions.innerHTML = '';
-    minutesActions.innerHTML = '';
-    minutesParticipants.innerHTML = '';
-
-    // Configure tabs based on whether minutes are enabled
-    if (enableMinutes) {
-        minutesTabBtn.classList.remove('disabled');
-        minutesLoading.classList.remove('hidden');
-        minutesContent.classList.add('hidden');
-    } else {
-        minutesTabBtn.classList.add('disabled');
-    }
-
     // Always start on transcription tab
     switchTab('transcription');
 
@@ -857,20 +752,6 @@ function handleStreamEvent(eventType, data) {
             // Show results section now
             showSection('results');
             showToast(t('toast.transcription_done'), 'success');
-            break;
-
-        case 'minutes_ready':
-            // Display meeting minutes
-            displayMeetingMinutes(data.minutes);
-            showToast(t('toast.minutes_done'), 'success');
-            break;
-
-        case 'minutes_error':
-            // Handle minutes generation error
-            minutesLoading.classList.add('hidden');
-            minutesContent.classList.remove('hidden');
-            minutesSummary.textContent = t('minutes.could_not_generate') + (data.error || '');
-            showToast(t('toast.minutes_error'), 'error');
             break;
 
         case 'error':
@@ -1071,194 +952,12 @@ function downloadVTT() {
     showToast(t('toast.vtt_downloaded'), 'success');
 }
 
-// Display Meeting Minutes
-function displayMeetingMinutes(minutes) {
-    currentMinutes = minutes;
-
-    // Hide loading, show content
-    minutesLoading.classList.add('hidden');
-    minutesContent.classList.remove('hidden');
-
-    // Executive Summary
-    minutesSummary.textContent = minutes.executive_summary || t('minutes.no_summary');
-
-    // Key Discussion Points
-    minutesKeyPoints.innerHTML = '';
-    if (minutes.key_discussion_points && minutes.key_discussion_points.length > 0) {
-        minutes.key_discussion_points.forEach(point => {
-            const li = document.createElement('li');
-            li.textContent = point;
-            minutesKeyPoints.appendChild(li);
-        });
-    } else {
-        const li = document.createElement('li');
-        li.textContent = t('minutes.no_key_points');
-        li.className = 'empty-item';
-        minutesKeyPoints.appendChild(li);
-    }
-
-    // Decisions Made
-    minutesDecisions.innerHTML = '';
-    if (minutes.decisions_made && minutes.decisions_made.length > 0) {
-        minutes.decisions_made.forEach(decision => {
-            const li = document.createElement('li');
-            li.textContent = decision;
-            minutesDecisions.appendChild(li);
-        });
-    } else {
-        const li = document.createElement('li');
-        li.textContent = t('minutes.no_decisions');
-        li.className = 'empty-item';
-        minutesDecisions.appendChild(li);
-    }
-
-    // Action Items
-    minutesActions.innerHTML = '';
-    if (minutes.action_items && minutes.action_items.length > 0) {
-        minutes.action_items.forEach(item => {
-            const li = document.createElement('li');
-            li.className = 'action-item';
-
-            const taskDiv = document.createElement('div');
-            taskDiv.className = 'action-task';
-            taskDiv.textContent = item.task || t('minutes.no_task');
-            li.appendChild(taskDiv);
-
-            const metaDiv = document.createElement('div');
-            metaDiv.className = 'action-meta';
-
-            const assigneeLabel = document.createElement('span');
-            assigneeLabel.className = 'action-label';
-            assigneeLabel.textContent = t('minutes.assignee_label');
-            metaDiv.appendChild(assigneeLabel);
-
-            metaDiv.appendChild(document.createTextNode(' '));
-
-            const assigneeValue = document.createElement('span');
-            assigneeValue.className = 'action-assignee';
-            assigneeValue.textContent = item.assignee || t('minutes.unassigned');
-            metaDiv.appendChild(assigneeValue);
-
-            const separator = document.createElement('span');
-            separator.className = 'action-separator';
-            separator.textContent = '|';
-            metaDiv.appendChild(separator);
-
-            const dateLabel = document.createElement('span');
-            dateLabel.className = 'action-label';
-            dateLabel.textContent = t('minutes.date_label');
-            metaDiv.appendChild(dateLabel);
-
-            metaDiv.appendChild(document.createTextNode(' '));
-
-            const deadlineValue = document.createElement('span');
-            deadlineValue.className = 'action-deadline';
-            deadlineValue.textContent = item.deadline || t('minutes.date_tbd');
-            metaDiv.appendChild(deadlineValue);
-
-            li.appendChild(metaDiv);
-            minutesActions.appendChild(li);
-        });
-    } else {
-        const li = document.createElement('li');
-        li.textContent = t('minutes.no_actions');
-        li.className = 'empty-item';
-        minutesActions.appendChild(li);
-    }
-
-    // Participants Mentioned
-    minutesParticipants.innerHTML = '';
-    if (minutes.participants_mentioned && minutes.participants_mentioned.length > 0) {
-        minutes.participants_mentioned.forEach(participant => {
-            const tag = document.createElement('span');
-            tag.className = 'participant-tag';
-            tag.textContent = participant;
-            minutesParticipants.appendChild(tag);
-        });
-    } else {
-        const span = document.createElement('span');
-        span.textContent = t('minutes.no_participants');
-        span.className = 'empty-item';
-        minutesParticipants.appendChild(span);
-    }
-}
-
-// Download Meeting Minutes as TXT
-function downloadMinutes() {
-    if (!currentMinutes) {
-        showToast(t('toast.no_minutes'), 'error');
-        return;
-    }
-
-    let content = t('minutes.download_header') + '\n';
-    content += '='.repeat(50) + '\n\n';
-
-    content += t('minutes.download_executive_summary') + '\n';
-    content += '-'.repeat(30) + '\n';
-    content += (currentMinutes.executive_summary || t('minutes.no_summary')) + '\n\n';
-
-    content += t('minutes.download_key_points') + '\n';
-    content += '-'.repeat(30) + '\n';
-    if (currentMinutes.key_discussion_points && currentMinutes.key_discussion_points.length > 0) {
-        currentMinutes.key_discussion_points.forEach((point, i) => {
-            content += `${i + 1}. ${point}\n`;
-        });
-    } else {
-        content += t('minutes.no_key_points') + '\n';
-    }
-    content += '\n';
-
-    content += t('minutes.download_decisions') + '\n';
-    content += '-'.repeat(30) + '\n';
-    if (currentMinutes.decisions_made && currentMinutes.decisions_made.length > 0) {
-        currentMinutes.decisions_made.forEach((decision, i) => {
-            content += `${i + 1}. ${decision}\n`;
-        });
-    } else {
-        content += t('minutes.no_decisions') + '\n';
-    }
-    content += '\n';
-
-    content += t('minutes.download_actions') + '\n';
-    content += '-'.repeat(30) + '\n';
-    if (currentMinutes.action_items && currentMinutes.action_items.length > 0) {
-        currentMinutes.action_items.forEach((item, i) => {
-            content += `${i + 1}. ${item.task || t('minutes.no_task')}\n`;
-            content += `   - ${t('minutes.assignee_label')} ${item.assignee || t('minutes.unassigned')}\n`;
-            content += `   - ${t('minutes.date_label')} ${item.deadline || t('minutes.date_tbd')}\n\n`;
-        });
-    } else {
-        content += t('minutes.no_actions') + '\n';
-    }
-    content += '\n';
-
-    content += t('minutes.download_participants') + '\n';
-    content += '-'.repeat(30) + '\n';
-    if (currentMinutes.participants_mentioned && currentMinutes.participants_mentioned.length > 0) {
-        content += currentMinutes.participants_mentioned.join(', ') + '\n';
-    } else {
-        content += t('minutes.no_participants') + '\n';
-    }
-
-    const blob = new Blob([content], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `meeting-minutes-${Date.now()}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    showToast(t('toast.minutes_downloaded'), 'success');
-}
-
 function resetApp() {
     showSection('upload');
     fileInput.value = '';
     currentFile = null;
     currentTranscription = '';
     currentSegments = [];
-    currentMinutes = null;
     segments.innerHTML = '';
     progressFill.style.width = '0%';
 
@@ -1266,22 +965,11 @@ function resetApp() {
     audioPlayer.src = '';
     audioPlayer.load();
 
-    // Reset minutes section
-    minutesLoading.classList.add('hidden');
-    minutesContent.classList.remove('hidden');
-    minutesSummary.textContent = '';
-    minutesKeyPoints.innerHTML = '';
-    minutesDecisions.innerHTML = '';
-    minutesActions.innerHTML = '';
-    minutesParticipants.innerHTML = '';
-
     // Reset tabs
-    minutesTabBtn.classList.add('disabled');
     switchTab('transcription');
 
     // Reset checkboxes
     enableDiarizationCheckbox.checked = false;
-    enableMinutesCheckbox.checked = false;
 }
 
 // ============================================

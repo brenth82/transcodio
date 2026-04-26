@@ -106,14 +106,6 @@ DIARIZATION_MAX_SPEAKERS = 5  # Maximum speakers to detect (uses silhouette scor
 DIARIZATION_WINDOW_LENGTHS = [1.5, 1.0, 0.5]  # Window lengths in seconds (only [0] is used)
 DIARIZATION_SHIFT_LENGTH = 0.75  # Shift length in seconds (window overlap)
 
-# Meeting Minutes Generation Configuration (Anthropic Claude API)
-ENABLE_MEETING_MINUTES = False  # Feature flag
-ANTHROPIC_MODEL_ID = "claude-haiku-4-5"  # Claude Haiku 4.5 - fast and cost-effective
-MINUTES_MAX_INPUT_TOKENS = 8000  # Maximum input tokens (transcription) - Haiku supports 200k context
-MINUTES_MAX_OUTPUT_TOKENS = 2048  # Maximum output tokens (minutes)
-MINUTES_TEMPERATURE = 0.3  # Low temperature for consistent, structured output
-MINUTES_CONTAINER_IDLE_TIMEOUT = 60  # 1 minute (shorter than STT since less frequent)
-
 # Voice Cloning Configuration
 ENABLE_VOICE_CLONING = True
 TTS_CONTAINER_IDLE_TIMEOUT = 20

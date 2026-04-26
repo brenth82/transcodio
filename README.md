@@ -2,13 +2,14 @@
 
 **AI-powered audio transcription, voice cloning, and image generation — all in one service**
 
-Transcodio is a production-ready platform powered by NVIDIA's Parakeet TDT 0.6B v3 model, deployed on Modal's serverless GPU infrastructure. It combines real-time streaming transcription, speaker diarization, AI meeting minutes, voice cloning with saved profiles, and text-to-image generation into a unified web application.
+Transcodio is a production-ready platform powered by NVIDIA's Parakeet TDT 0.6B v3 model, deployed on Modal's serverless GPU infrastructure. It combines real-time streaming transcription, speaker diarization, voice cloning with saved profiles, and text-to-image generation into a unified web application.
+
+Meeting minutes are not included in this version of the repo. That feature may be added back later, likely with a different LLM/provider.
 
 ## Features
 
 - **Real-time Streaming Transcription**: Progressive results via SSE with silence-based segmentation using NVIDIA Parakeet TDT 0.6B v3
 - **Speaker Diarization**: Automatic speaker identification using NVIDIA TitaNet embeddings + AgglomerativeClustering
-- **Meeting Minutes**: AI-powered summaries with action items using Anthropic Claude Haiku 4.5
 - **Voice Cloning**: Clone any voice with Qwen3-TTS — upload or record reference audio (up to 5 minutes), then synthesize up to 50,000 characters of text. The Modal TTS container is pinned to the Qwen3-TTS source build at commit `1ab0dd75353392f28a0d05d9ca960c9954b13c83` and installs `flash-attn==2.8.3` with `--no-build-isolation`.
 - **Saved Voice Profiles**: Persistently store voice profiles in Modal Volume for reuse without re-uploading
 - **Image Generation**: Text-to-image using FLUX.1-schnell with 4-step inference (~3-5 seconds per image)
@@ -28,7 +29,6 @@ Transcodio is a production-ready platform powered by NVIDIA's Parakeet TDT 0.6B 
 - [uv](https://github.com/astral-sh/uv) — Fast Python package installer and runner
 - [Modal](https://modal.com) account (free tier available)
 - FFmpeg installed locally
-- Anthropic API key (for meeting minutes)
 - HuggingFace token (for image generation — FLUX.1-schnell is a gated model)
 
 ### Installation
@@ -51,9 +51,6 @@ py -m modal setup
 
 4. Create Modal secrets:
 ```bash
-# Anthropic API key (required for meeting minutes)
-py -m modal secret create anthropic-api-key ANTHROPIC_API_KEY=sk-ant-...
-
 # HuggingFace token (required for image generation)
 py -m modal secret create hf-token HF_TOKEN=hf_...
 ```
@@ -72,10 +69,9 @@ export TRANSCODIO_API_KEY=your-secret-api-key
 py -m modal deploy modal_app/app.py
 ```
 
-This deploys 6 Modal classes:
+This deploys 5 Modal classes:
 - **ParakeetSTTModel** — GPU transcription (streaming + non-streaming)
 - **SpeakerDiarizerModel** — Speaker identification with TitaNet
-- **MeetingMinutesGenerator** — Claude Haiku 4.5 meeting summaries
 - **Qwen3TTSVoiceCloner** — Voice cloning and synthesis
 - **VoiceStorage** — Persistent voice profile management
 - **FluxImageGenerator** — Text-to-image generation
@@ -96,9 +92,9 @@ The UI has three modes, with English as the default language. Click the **ES/EN*
 
 **Transcription**
 1. Drag and drop an audio file or click to browse
-2. Toggle optional features: Speaker Diarization, Meeting Minutes
+2. Toggle optional speaker diarization if needed
 3. Watch real-time transcription results appear segment by segment
-4. View speaker-labeled segments and meeting minutes tabs
+4. View speaker-labeled segments
 5. Copy text, download transcription (TXT), or export subtitles (SRT/VTT)
 6. Listen to original audio with the integrated player
 
@@ -164,11 +160,10 @@ curl -X POST "http://localhost:8000/api/transcribe" -F "file=@audio.mp3"
 ```bash
 curl -X POST "http://localhost:8000/api/transcribe/stream" \
   -F "file=@audio.mp3" \
-  -F "enable_diarization=true" \
-  -F "enable_minutes=true"
+  -F "enable_diarization=true"
 ```
 
-SSE events: `metadata` → `progress` (per segment) → `speakers_ready` → `minutes_ready` → `complete`
+SSE events: `metadata` → `progress` (per segment) → `speakers_ready` → `complete`
 
 **GET /api/audio/{session_id}** — Retrieve cached audio for playback
 
@@ -259,10 +254,10 @@ curl -X POST "http://localhost:8000/api/generate-image" \
 │  │ Voice Clone  │  │ Image Generation          │ │
 │  │ (L4 GPU)     │  └───────────────────────────┘ │
 │  └──────────────┘                                 │
-│  ┌──────────────┐  ┌───────────────────────────┐ │
-│  │ Claude Haiku │  │ Voice Storage             │ │
-│  │ Minutes (CPU)│  │ (Modal Volume)            │ │
-│  └──────────────┘  └───────────────────────────┘ │
+│  ┌───────────────────────────┐                   │
+│  │ Voice Storage             │                   │
+│  │ (Modal Volume)            │                   │
+│  └───────────────────────────┘                   │
 └───────────────────────────────────────────────────┘
 ```
 
@@ -302,10 +297,6 @@ SILENCE_MIN_LENGTH_MS = 700
 ENABLE_SPEAKER_DIARIZATION = True
 DIARIZATION_MAX_SPEAKERS = 5
 
-# Meeting Minutes
-ENABLE_MEETING_MINUTES = True
-ANTHROPIC_MODEL_ID = "claude-haiku-4-5-20251001"
-
 # Voice Cloning
 VOICE_CLONE_MAX_REF_DURATION = 300   # 5 minutes
 VOICE_CLONE_MAX_TARGET_TEXT = 50000  # characters
@@ -344,7 +335,6 @@ RATE_LIMIT_DEFAULT = "30/minute"
 |---------|------|
 | Transcription | ~$0.006 per minute of audio |
 | Speaker Diarization | Included (same GPU) |
-| Meeting Minutes | ~$0.001 per request (Haiku API) |
 | Voice Cloning | ~$0.01-0.02 per synthesis |
 | Image Generation | ~$0.01-0.02 per image |
 
@@ -353,7 +343,7 @@ RATE_LIMIT_DEFAULT = "30/minute"
 ```
 transcodio/
 ├── modal_app/
-│   ├── app.py             # 6 Modal classes (STT, diarization, TTS, image gen, minutes, storage)
+│   ├── app.py             # 5 Modal classes (STT, diarization, TTS, image gen, storage)
 │   └── image.py           # Image generation helper
 ├── api/
 │   ├── main.py            # FastAPI endpoints + auth, rate limiting, security headers
@@ -385,12 +375,6 @@ py -m modal deploy modal_app/app.py
 
 **Slow first request** — Cold start takes 30-60s. GPU memory snapshots are enabled by default for 85-90% faster subsequent cold starts.
 
-**Meeting minutes not working** — Check the Anthropic API key secret:
-```bash
-py -m modal secret list
-py -m modal secret create anthropic-api-key ANTHROPIC_API_KEY=sk-ant-...
-```
-
 **Image generation not working** — Check the HuggingFace token secret:
 ```bash
 py -m modal secret list
@@ -410,7 +394,6 @@ ffmpeg -version
 - [NVIDIA TitaNet](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/titanet_large) — Speaker embeddings
 - [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS) — Voice cloning model
 - [FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell) — Image generation model
-- [Anthropic Claude](https://www.anthropic.com) — Meeting minutes generation
 - [Modal](https://modal.com) — Serverless GPU infrastructure
 - [FastAPI](https://fastapi.tiangolo.com) — Web framework
 

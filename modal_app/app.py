@@ -45,13 +45,6 @@ DIARIZATION_MAX_SPEAKERS = 5
 DIARIZATION_WINDOW_LENGTHS = [1.5, 1.0, 0.5]
 DIARIZATION_SHIFT_LENGTH = 0.75
 
-# Meeting minutes
-ANTHROPIC_MODEL_ID = "claude-haiku-4-5"
-MINUTES_MAX_INPUT_TOKENS = 8000
-MINUTES_MAX_OUTPUT_TOKENS = 2048
-MINUTES_TEMPERATURE = 0.3
-MINUTES_CONTAINER_IDLE_TIMEOUT = 60
-
 # Voice cloning
 QWEN_TTS_SOURCE_REF = (
     "git+https://github.com/QwenLM/Qwen3-TTS.git"
@@ -116,12 +109,6 @@ stt_image = (
         "scikit-learn>=1.3.0",  # For spectral clustering
         "soundfile>=0.12.1",    # For audio file I/O
     )
-)
-
-# Anthropic API image for meeting minutes generation (no GPU needed)
-anthropic_image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .pip_install("anthropic>=0.40.0")
 )
 
 # Image generation image for FLUX.1-schnell
@@ -2027,155 +2014,6 @@ class FluxImageGenerator:
                 "success": False,
                 "error": str(e),
             }
-
-
-@app.cls(
-    image=anthropic_image,
-    secrets=[modal.Secret.from_name("anthropic-api-key")],
-    scaledown_window=MINUTES_CONTAINER_IDLE_TIMEOUT,
-    timeout=20,  # 2 minutes max for API call
-)
-class MeetingMinutesGenerator:
-    """Meeting minutes generator using Anthropic Claude Haiku 4.5 API."""
-
-    @modal.enter()
-    def setup_client(self):
-        """Initialize Anthropic client."""
-        import anthropic
-        import os
-
-        self.client = anthropic.Anthropic(
-            api_key=os.environ["ANTHROPIC_API_KEY"]
-        )
-        print(f"Anthropic client initialized for model: {ANTHROPIC_MODEL_ID}")
-
-    @modal.method()
-    def generate_minutes(self, transcription: str, speakers: list = None) -> Dict[str, Any]:
-        """
-        Generate meeting minutes from transcription using Claude Haiku 4.5.
-
-        Args:
-            transcription: Full transcription text
-            speakers: Optional list of speaker-annotated segments
-
-        Returns:
-            Dict with structured meeting minutes
-        """
-        from datetime import datetime
-
-        try:
-            # Get current date for relative date calculations
-            today = datetime.now()
-            date_str = today.strftime("%d de %B de %Y")  # e.g., "21 de enero de 2025"
-            weekday = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"][today.weekday()]
-
-            # Build speaker context if available
-            speaker_context = ""
-            if speakers:
-                unique_speakers = set(seg.get("speaker", "Speaker 1") for seg in speakers)
-                speaker_context = f"\n\nParticipantes detectados: {', '.join(sorted(unique_speakers))}"
-
-            # Build the prompt (Spanish)
-            system_prompt = f"""Eres un experto generador de minutas de reunión. Analiza la transcripción y extrae la información clave en formato JSON estructurado.
-
-FECHA DE HOY: {weekday}, {date_str}
-
-Cuando en la transcripción se mencionen fechas relativas como "mañana", "pasado mañana", "la próxima semana", "el lunes", etc., DEBES calcular y mostrar la fecha exacta en formato "DD/MM/YYYY". Por ejemplo:
-- Si hoy es martes 21/01/2025 y dicen "mañana" → "22/01/2025"
-- Si dicen "la próxima semana" → mostrar la fecha del lunes de la próxima semana
-- Si dicen "el viernes" → calcular el próximo viernes
-
-Debes responder SOLO con JSON válido, sin ningún otro texto. El JSON debe tener exactamente esta estructura:
-{{
-  "executive_summary": "Un resumen de 2-3 oraciones de la reunión",
-  "key_discussion_points": ["Punto 1", "Punto 2", ...],
-  "decisions_made": ["Decisión 1", "Decisión 2", ...],
-  "action_items": [{{"task": "Descripción de la tarea", "assignee": "Nombre de persona o Desconocido", "deadline": "DD/MM/YYYY o Por definir"}}],
-  "participants_mentioned": ["Nombre 1", "Nombre 2", ...]
-}}
-
-Si una sección no tiene elementos, usa un array vacío []. Siempre incluye los cinco campos. Responde en español."""
-
-            user_prompt = f"""Genera una minuta de reunión a partir de esta transcripción:{speaker_context}
-
-TRANSCRIPCIÓN:
-{transcription[:MINUTES_MAX_INPUT_TOKENS * 4]}
-
-Recuerda: Responde SOLO con JSON válido, sin ningún otro texto. El contenido debe estar en español. Las fechas deben ser calculadas basándose en la fecha de hoy."""
-
-            # Call Claude Haiku 4.5 API
-            message = self.client.messages.create(
-                model=ANTHROPIC_MODEL_ID,
-                max_tokens=MINUTES_MAX_OUTPUT_TOKENS,
-                temperature=MINUTES_TEMPERATURE,
-                system=system_prompt,
-                messages=[
-                    {"role": "user", "content": user_prompt}
-                ]
-            )
-
-            # Extract response text
-            response = message.content[0].text.strip()
-            print(f"Claude response: {response[:500]}...")
-
-            # Parse JSON from response
-            minutes = self._parse_json_response(response)
-
-            return {
-                "success": True,
-                "minutes": minutes,
-            }
-
-        except Exception as e:
-            import traceback
-            print(f"Minutes generation error: {e}")
-            print(traceback.format_exc())
-            return {
-                "success": False,
-                "error": str(e),
-                "minutes": self._empty_minutes(),
-            }
-
-    def _parse_json_response(self, response: str) -> Dict[str, Any]:
-        """Parse JSON from LLM response, handling common issues."""
-        import re
-
-        # Try direct JSON parse first
-        try:
-            return json.loads(response)
-        except json.JSONDecodeError:
-            pass
-
-        # Try to extract JSON from markdown code block
-        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response, re.DOTALL)
-        if json_match:
-            try:
-                return json.loads(json_match.group(1))
-            except json.JSONDecodeError:
-                pass
-
-        # Try to find JSON object in response
-        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response, re.DOTALL)
-        if json_match:
-            try:
-                return json.loads(json_match.group(0))
-            except json.JSONDecodeError:
-                pass
-
-        # Return empty structure if parsing fails
-        print(f"Failed to parse JSON from response: {response[:200]}...")
-        return self._empty_minutes()
-
-    def _empty_minutes(self) -> Dict[str, Any]:
-        """Return empty minutes structure."""
-        return {
-            "executive_summary": "Unable to generate summary.",
-            "key_discussion_points": [],
-            "decisions_made": [],
-            "action_items": [],
-            "participants_mentioned": [],
-        }
-
 
 @app.local_entrypoint()
 def main():

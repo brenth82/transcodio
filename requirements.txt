@@ -18,9 +18,6 @@ python-multipart>=0.0.21
 sse-starlette>=3.1.2
 aiofiles>=25.1.0
 
-# LLM API (for meeting minutes)
-anthropic>=0.40.0
-
 # TTS (for voice cloning - installed in Modal container)
 # Qwen3-TTS source install pinned in modal_app/app.py:
 # git+https://github.com/QwenLM/Qwen3-TTS.git@1ab0dd75353392f28a0d05d9ca960c9954b13c83

@@ -71,11 +71,6 @@
                         <span class="checkbox-custom"></span>
                         <span class="checkbox-text" data-i18n="upload.identify_speakers">Identify speakers</span>
                     </label>
-                    <label class="checkbox-label">
-                        <input type="checkbox" id="enableMinutes">
-                        <span class="checkbox-custom"></span>
-                        <span class="checkbox-text" data-i18n="upload.generate_minutes">Generate meeting minutes</span>
-                    </label>
                 </div>
             </section>
 
@@ -146,7 +141,6 @@
                 <div class="tabs-container">
                     <div class="tabs-header">
                         <button class="tab-btn active" data-tab="transcription" data-i18n="results.tab_transcription">Transcription</button>
-                        <button class="tab-btn" data-tab="minutes" id="minutesTabBtn" data-i18n="results.tab_minutes">Minutes</button>
                     </div>
 
                     <!-- Transcription Tab -->
@@ -156,47 +150,6 @@
                         </div>
                     </div>
 
-                    <!-- Minutes Tab -->
-                    <div class="tab-content" id="minutesTab">
-                        <div class="minutes-section" id="minutesSection">
-                    <div class="minutes-header">
-                        <h3 data-i18n="minutes.title">Meeting Minutes</h3>
-                        <button class="btn btn-secondary" id="downloadMinutesBtn">
-                            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-                                <path d="M9 3 L9 12 M5 9 L9 13 L13 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                                <path d="M3 15 L15 15" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                            </svg>
-                            <span data-i18n="minutes.download">Download Minutes</span>
-                        </button>
-                    </div>
-                    <div class="minutes-loading hidden" id="minutesLoading">
-                        <div class="spinner-small"></div>
-                        <span data-i18n="minutes.loading">Generating meeting minutes...</span>
-                    </div>
-                    <div class="minutes-content" id="minutesContent">
-                        <div class="minutes-block">
-                            <h4 data-i18n="minutes.executive_summary">Executive Summary</h4>
-                            <p id="minutesSummary"></p>
-                        </div>
-                        <div class="minutes-block">
-                            <h4 data-i18n="minutes.key_points">Key Discussion Points</h4>
-                            <ul id="minutesKeyPoints"></ul>
-                        </div>
-                        <div class="minutes-block">
-                            <h4 data-i18n="minutes.decisions">Decisions Made</h4>
-                            <ul id="minutesDecisions"></ul>
-                        </div>
-                        <div class="minutes-block">
-                            <h4 data-i18n="minutes.action_items">Action Items</h4>
-                            <ul id="minutesActions" class="action-items-list"></ul>
-                        </div>
-                        <div class="minutes-block">
-                            <h4 data-i18n="minutes.participants">Participants Mentioned</h4>
-                            <div id="minutesParticipants" class="participants-tags"></div>
-                        </div>
-                    </div>
-                </div>
-                    </div>
                 </div>
             </section>
 
