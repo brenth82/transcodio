@@ -358,29 +358,19 @@ async def transcribe_audio_stream(
         # Create async generator for streaming
         async def event_generator():
             try:
-                import asyncio
+                import json
                 print("Starting stream generation...")
-                # Call Modal streaming transcription in thread pool to avoid blocking
-                loop = asyncio.get_event_loop()
-
-                def sync_generator():
-                    for segment_json in model.transcribe_stream.remote_gen(preprocessed_bytes, duration):
-                        yield segment_json
 
                 # Accumulate segments for diarization
                 segments_data = []
                 full_text = ""
 
-                # Process synchronous generator in async context
-                for segment_json in sync_generator():
+                async for segment_json in model.transcribe_stream.remote_gen.aio(preprocessed_bytes, duration):
                     # Parse and yield as SSE event
                     print(f"Received segment: {segment_json[:100] if len(segment_json) > 100 else segment_json}...")
                     segment_data = json.loads(segment_json)
                     event_type = segment_data.get("type", "unknown")
                     print(f"Event type: {event_type}")
-
-                    # Yield control to event loop
-                    await asyncio.sleep(0)
 
                     if event_type == "metadata":
                         yield {

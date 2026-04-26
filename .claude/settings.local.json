@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(claude-api)",
+      "Bash(py -m modal app logs transcodio-app)",
+      "Bash(py *)",
+      "Bash(python *)"
+    ]
+  }
+}

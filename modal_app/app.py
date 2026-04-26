@@ -46,7 +46,7 @@ DIARIZATION_WINDOW_LENGTHS = [1.5, 1.0, 0.5]
 DIARIZATION_SHIFT_LENGTH = 0.75
 
 # Meeting minutes
-ANTHROPIC_MODEL_ID = "claude-haiku-4-5-20251001"
+ANTHROPIC_MODEL_ID = "claude-haiku-4-5"
 MINUTES_MAX_INPUT_TOKENS = 8000
 MINUTES_MAX_OUTPUT_TOKENS = 2048
 MINUTES_TEMPERATURE = 0.3
@@ -135,7 +135,7 @@ qwen_tts_image = (
         "HF_HOME": "/models",
         "DEBIAN_FRONTEND": "noninteractive",
     })
-    .apt_install("ffmpeg", "libsndfile1")
+    .apt_install("ffmpeg", "libsndfile1", "sox")
     .pip_install(
         "qwen-tts",
         "torch",

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "modal-serverless-gpu": {
+      "source": "davila7/claude-code-templates",
+      "sourceType": "github",
+      "computedHash": "ec1712cd12927dc5c808925e2c9bb6c1a2ca9aee0deca985245f40cc00d1bc54"
+    }
+  }
+}
