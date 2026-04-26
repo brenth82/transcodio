@@ -38,8 +38,8 @@ MODAL_APP_NAME = "transcodio-app"
 MODAL_VOLUME_NAME = "parakeet-models"  # Changed from kyutai-stt-models
 MODAL_GPU_TYPE = "L4"  # NVIDIA L4
 MODAL_GPU_COUNT = 1
-MODAL_CONTAINER_IDLE_TIMEOUT = 120  # 2 minutes
-MODAL_TIMEOUT = 3000  # 50 minutes max processing time (allows for 33min audio + diarization)
+MODAL_CONTAINER_IDLE_TIMEOUT = 20  # 2 minutes
+MODAL_TIMEOUT = 9000  # 50 minutes max processing time (allows for 33min audio + diarization)
 MODAL_MEMORY_MB = 8192  # 8GB RAM
 
 # ============================================================================
@@ -62,7 +62,7 @@ ENABLE_GPU_MEMORY_SNAPSHOT = True
 # Runs a dummy transcription during initialization to compile CUDA kernels
 # Works best WITH GPU snapshots to capture compiled kernels
 # Expected improvement: Minimal without snapshots, significant with GPU snapshots
-ENABLE_MODEL_WARMUP = False
+ENABLE_MODEL_WARMUP = True
 
 # Optimization 4: Extended Container Idle Timeout
 # Keep containers warm longer to avoid cold starts
@@ -107,7 +107,7 @@ DIARIZATION_WINDOW_LENGTHS = [1.5, 1.0, 0.5]  # Window lengths in seconds (only 
 DIARIZATION_SHIFT_LENGTH = 0.75  # Shift length in seconds (window overlap)
 
 # Meeting Minutes Generation Configuration (Anthropic Claude API)
-ENABLE_MEETING_MINUTES = True  # Feature flag
+ENABLE_MEETING_MINUTES = False  # Feature flag
 ANTHROPIC_MODEL_ID = "claude-haiku-4-5-20251001"  # Claude Haiku 4.5 - fast and cost-effective
 MINUTES_MAX_INPUT_TOKENS = 8000  # Maximum input tokens (transcription) - Haiku supports 200k context
 MINUTES_MAX_OUTPUT_TOKENS = 2048  # Maximum output tokens (minutes)
@@ -116,7 +116,7 @@ MINUTES_CONTAINER_IDLE_TIMEOUT = 60  # 1 minute (shorter than STT since less fre
 
 # Voice Cloning Configuration
 ENABLE_VOICE_CLONING = True
-TTS_CONTAINER_IDLE_TIMEOUT = 120
+TTS_CONTAINER_IDLE_TIMEOUT = 20
 
 # Available TTS Models
 TTS_MODELS = {
@@ -154,7 +154,7 @@ ENABLE_IMAGE_GENERATION = True
 IMAGE_GENERATION_MODEL = "black-forest-labs/FLUX.1-schnell"
 IMAGE_GPU_TYPE = "L4"
 IMAGE_MEMORY_MB = 16384
-IMAGE_CONTAINER_IDLE_TIMEOUT = 120
+IMAGE_CONTAINER_IDLE_TIMEOUT = 20
 IMAGE_MAX_PROMPT_LENGTH = 500
 IMAGE_DEFAULT_WIDTH = 768
 IMAGE_DEFAULT_HEIGHT = 768

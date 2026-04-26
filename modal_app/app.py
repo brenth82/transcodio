@@ -18,8 +18,8 @@ import modal
 MODAL_APP_NAME = "transcodio-app"
 MODAL_VOLUME_NAME = "parakeet-models"
 MODAL_GPU_TYPE = "L4"
-MODAL_CONTAINER_IDLE_TIMEOUT = 120
-MODAL_TIMEOUT = 3000
+MODAL_CONTAINER_IDLE_TIMEOUT = 20
+MODAL_TIMEOUT = 9000
 MODAL_MEMORY_MB = 8192
 
 # Cold start optimization flags
@@ -63,7 +63,7 @@ TTS_MODELS = {
         "description": "Fast, good quality (1.7B params)",
     },
 }
-TTS_CONTAINER_IDLE_TIMEOUT = 120
+TTS_CONTAINER_IDLE_TIMEOUT = 20
 VOICES_INDEX_FILE = "index.json"
 MAX_SAVED_VOICES = 50
 
@@ -71,7 +71,7 @@ MAX_SAVED_VOICES = 50
 IMAGE_GENERATION_MODEL = "black-forest-labs/FLUX.1-schnell"
 IMAGE_GPU_TYPE = "L4"
 IMAGE_MEMORY_MB = 16384
-IMAGE_CONTAINER_IDLE_TIMEOUT = 120
+IMAGE_CONTAINER_IDLE_TIMEOUT = 20
 
 # =============================================================================
 
@@ -1088,7 +1088,7 @@ class FluxImageGenerator:
     image=anthropic_image,
     secrets=[modal.Secret.from_name("anthropic-api-key")],
     scaledown_window=MINUTES_CONTAINER_IDLE_TIMEOUT,
-    timeout=120,  # 2 minutes max for API call
+    timeout=20,  # 2 minutes max for API call
 )
 class MeetingMinutesGenerator:
     """Meeting minutes generator using Anthropic Claude Haiku 4.5 API."""
