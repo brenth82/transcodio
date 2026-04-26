@@ -884,6 +884,8 @@ class Qwen3TTSVoiceCloner:
         start_time = time.time()
         print(f"Loading Qwen3-TTS model: {model_config['model_id']}...")
 
+        import warnings
+        warnings.filterwarnings("ignore", message="FNV hashing is not implemented in Numba", category=UserWarning)
         from qwen_tts import Qwen3TTSModel
 
         self.model = Qwen3TTSModel.from_pretrained(
@@ -1250,7 +1252,7 @@ def main():
     model = ParakeetSTTModel()
     segments = []
 
-    for chunk in model.transcribe_stream.remote(audio_bytes):
+    for chunk in model.transcribe_stream.remote_gen(audio_bytes):
         data = json.loads(chunk)
         if data["type"] == "metadata":
             print(f"Duration: {data['duration']:.2f}s | Language: {data['language']}")

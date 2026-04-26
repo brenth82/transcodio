@@ -270,7 +270,7 @@ async def transcribe_audio(
 
         # Call Modal transcription
         try:
-            result = model.transcribe.remote(preprocessed_bytes)
+            result = await model.transcribe.remote.aio(preprocessed_bytes)
             result["duration"] = duration
             return TranscriptionResponse(**result)
         except Exception as e:
@@ -412,7 +412,7 @@ async def transcribe_audio_stream(
                                 diarizer = Diarizer()
 
                                 # Run diarization
-                                speaker_timeline = diarizer.diarize.remote(preprocessed_bytes, duration)
+                                speaker_timeline = await diarizer.diarize.remote.aio(preprocessed_bytes, duration)
 
                                 if speaker_timeline:
                                     # Import alignment function
@@ -462,7 +462,7 @@ async def transcribe_audio_stream(
                                 generator = MinutesGenerator()
 
                                 # Generate minutes
-                                minutes_result = generator.generate_minutes.remote(
+                                minutes_result = await generator.generate_minutes.remote.aio(
                                     full_text,
                                     segments_data if segments_data else None
                                 )
@@ -649,7 +649,7 @@ async def voice_clone(
 
         # Generate voice clone
         try:
-            result = model.generate_voice_clone.remote(
+            result = await model.generate_voice_clone.remote.aio(
                 preprocessed_ref,
                 ref_text,
                 target_text,
@@ -716,7 +716,7 @@ async def list_voices(request: Request):
 
         VoiceStorage = modal.Cls.from_name(config.MODAL_APP_NAME, "VoiceStorage")
         storage = VoiceStorage()
-        voices = storage.list_voices.remote()
+        voices = await storage.list_voices.remote.aio()
         return SavedVoiceListResponse(voices=voices)
     except Exception as e:
         raise HTTPException(
@@ -806,7 +806,7 @@ async def save_voice(
         storage = VoiceStorage()
 
         voice_id = str(uuid.uuid4())
-        result = storage.save_voice.remote(
+        result = await storage.save_voice.remote.aio(
             voice_id=voice_id,
             name=name.strip(),
             ref_audio_bytes=preprocessed_ref,
@@ -848,7 +848,7 @@ async def delete_voice(request: Request, voice_id: str):
 
         VoiceStorage = modal.Cls.from_name(config.MODAL_APP_NAME, "VoiceStorage")
         storage = VoiceStorage()
-        result = storage.delete_voice.remote(voice_id)
+        result = await storage.delete_voice.remote.aio(voice_id)
 
         if not result.get("success"):
             raise HTTPException(status_code=404, detail="Voice not found")
@@ -899,7 +899,7 @@ async def synthesize_with_voice(
         # Get saved voice
         VoiceStorage = modal.Cls.from_name(config.MODAL_APP_NAME, "VoiceStorage")
         storage = VoiceStorage()
-        voice_data = storage.get_voice.remote(voice_id)
+        voice_data = await storage.get_voice.remote.aio(voice_id)
 
         if not voice_data.get("success"):
             raise HTTPException(status_code=404, detail=voice_data.get("error", "Voice not found"))
@@ -911,7 +911,7 @@ async def synthesize_with_voice(
         TTSModel = modal.Cls.from_name(config.MODAL_APP_NAME, "Qwen3TTSVoiceCloner")
         model = TTSModel()
 
-        result = model.generate_voice_clone.remote(
+        result = await model.generate_voice_clone.remote.aio(
             ref_audio_bytes,
             metadata["ref_text"],
             target_text.strip(),
@@ -1046,7 +1046,7 @@ async def generate_image(
 
         # Generate image
         try:
-            result = generator.generate_image.remote(
+            result = await generator.generate_image.remote.aio(
                 prompt=prompt.strip(),
                 width=width,
                 height=height,
