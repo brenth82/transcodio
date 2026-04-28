@@ -145,6 +145,51 @@ def _log_tts_telemetry(trace_id: str, telemetry: Optional[dict]) -> None:
         telemetry.get("effective_max_concurrency"),
     )
 
+
+_TTS_BATCH_START_RE = re.compile(r"batch-start index=(\d+)/(\d+) chunks=(\d+)-(\d+) size=(\d+)")
+_TTS_PROGRESS_RE = re.compile(r"progress (\d+)/(\d+) \(([\d.]+)%\) mode=([a-z_]+)")
+_TTS_CHUNK_PLAN_RE = re.compile(r"chunk-plan chunks=(\d+) batch_size=(\d+) planned_batches=(\d+)")
+
+
+def _parse_tts_status_message(message: str) -> dict:
+    """Parse Modal TTS status lines into structured progress for the browser UI."""
+    payload = {"message": message}
+
+    batch_match = _TTS_BATCH_START_RE.search(message)
+    if batch_match:
+        payload.update({
+            "kind": "batch_start",
+            "batch_index": int(batch_match.group(1)),
+            "batch_total": int(batch_match.group(2)),
+            "chunk_start": int(batch_match.group(3)),
+            "chunk_end": int(batch_match.group(4)),
+            "batch_size": int(batch_match.group(5)),
+        })
+        return payload
+
+    progress_match = _TTS_PROGRESS_RE.search(message)
+    if progress_match:
+        payload.update({
+            "kind": "chunk_progress",
+            "chunk_current": int(progress_match.group(1)),
+            "chunk_total": int(progress_match.group(2)),
+            "progress_pct": float(progress_match.group(3)),
+            "mode": progress_match.group(4),
+        })
+        return payload
+
+    plan_match = _TTS_CHUNK_PLAN_RE.search(message)
+    if plan_match:
+        payload.update({
+            "kind": "chunk_plan",
+            "chunk_total": int(plan_match.group(1)),
+            "batch_size": int(plan_match.group(2)),
+            "batch_total": int(plan_match.group(3)),
+        })
+        return payload
+
+    return payload
+
 async def verify_api_key(request: Request):
     """Verify API key if configured. Skip for public routes."""
     # No auth required if API_KEY is not configured (dev mode)
@@ -1216,6 +1261,138 @@ async def synthesize_with_voice(
     except Exception as e:
         logger.exception("[synthesize] unexpected server error")
         raise HTTPException(status_code=500, detail="An unexpected error occurred.")
+
+
+@app.post("/api/synthesize/stream")
+@limiter.limit(config.RATE_LIMIT_VOICE_CLONE)
+async def synthesize_with_voice_stream(
+    request: Request,
+    voice_id: str = Form(..., description="ID of the saved voice to use"),
+    target_text: str = Form(..., description="Text to synthesize"),
+):
+    """Stream synth progress to the browser while generating audio."""
+    await verify_api_key(request)
+    _validate_uuid(voice_id, "voice ID")
+
+    if not config.ENABLE_VOICE_CLONING:
+        raise HTTPException(status_code=503, detail="Voice cloning is disabled")
+
+    if not target_text or len(target_text.strip()) == 0:
+        raise HTTPException(status_code=400, detail="Target text cannot be empty")
+    if len(target_text) > config.VOICE_CLONE_MAX_TARGET_TEXT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Target text too long (max {config.VOICE_CLONE_MAX_TARGET_TEXT} characters)"
+        )
+
+    import modal
+    import json
+
+    request_trace = uuid.uuid4().hex[:8]
+    VoiceStorage = modal.Cls.from_name(config.MODAL_APP_NAME, "VoiceStorage")
+    storage = VoiceStorage()
+    voice_data = await storage.get_voice_with_prompt.remote.aio(voice_id)
+    if not voice_data.get("success"):
+        raise HTTPException(status_code=404, detail=voice_data.get("error", "Voice not found"))
+
+    metadata = voice_data["metadata"]
+    prompt_bytes = voice_data.get("prompt_bytes")
+    ref_audio_bytes = voice_data.get("audio_bytes")
+
+    if prompt_bytes is None:
+        if not ref_audio_bytes:
+            raise HTTPException(status_code=404, detail="Voice prompt not found")
+        TTSModel = modal.Cls.from_name(config.MODAL_APP_NAME, "Qwen3TTSVoiceCloner")
+        prompt_model = TTSModel()
+        prompt_bytes = await prompt_model.compute_voice_prompt.remote.aio(
+            ref_audio_bytes,
+            metadata.get("ref_text", ""),
+            metadata["language"],
+        )
+        await storage.save_voice_prompt.remote.aio(voice_id, prompt_bytes)
+
+    async def event_generator():
+        TTSModel = modal.Cls.from_name(config.MODAL_APP_NAME, "Qwen3TTSVoiceCloner")
+        model = TTSModel()
+        result = None
+
+        try:
+            async for synth_event in model.generate_voice_clone_stream.remote_gen.aio(
+                None,
+                metadata.get("ref_text", ""),
+                target_text.strip(),
+                metadata["language"],
+                request_trace,
+                prompt_bytes,
+            ):
+                if isinstance(synth_event, (bytes, bytearray)):
+                    synth_event = synth_event.decode("utf-8", errors="replace")
+                if isinstance(synth_event, str):
+                    try:
+                        synth_event = json.loads(synth_event)
+                    except json.JSONDecodeError:
+                        synth_event = {"type": "status", "message": synth_event}
+
+                if not isinstance(synth_event, dict):
+                    continue
+
+                event_type = synth_event.get("type")
+                if event_type == "status":
+                    yield {
+                        "event": "progress",
+                        "data": json.dumps(_parse_tts_status_message(synth_event.get("message", ""))),
+                    }
+                elif event_type == "error":
+                    yield {
+                        "event": "error",
+                        "data": json.dumps({"error": synth_event.get("error", "Unknown synthesis error")}),
+                    }
+                    return
+                elif event_type == "complete":
+                    result = synth_event.get("result")
+
+            if result is None:
+                result = await model.generate_voice_clone.remote.aio(
+                    None,
+                    metadata.get("ref_text", ""),
+                    target_text.strip(),
+                    metadata["language"],
+                    request_trace,
+                    prompt_bytes,
+                )
+
+            if not result or not result.get("success"):
+                yield {
+                    "event": "error",
+                    "data": json.dumps({"error": (result or {}).get("error", "Unknown synthesis error")}),
+                }
+                return
+
+            session_id = str(uuid.uuid4())
+            expiry_time = datetime.now() + timedelta(hours=1)
+            audio_cache[session_id] = (
+                result["audio_bytes"],
+                "audio/wav",
+                "synthesized.wav",
+                expiry_time,
+            )
+            cleanup_expired_audio()
+
+            yield {
+                "event": "complete",
+                "data": json.dumps({
+                    "audio_session_id": session_id,
+                    "duration": result.get("duration"),
+                }),
+            }
+        except Exception:
+            logger.exception("[synthesize-stream:%s] unexpected server error", request_trace)
+            yield {
+                "event": "error",
+                "data": json.dumps({"error": "An unexpected error occurred."}),
+            }
+
+    return EventSourceResponse(event_generator())
 
 
 @app.get("/api/image/{session_id}")

@@ -55,7 +55,11 @@ const translations = {
         'voice.generate': 'Generate Voice',
         'voice.save': 'Save Voice',
         'voice.processing_title': 'Generating cloned voice...',
-        'voice.processing_subtitle': 'This may take a few seconds',
+        'voice.processing_subtitle': 'This may take some time for longer texts',
+        'voice.processing_detail_preparing': 'Preparing synthesis...',
+        'voice.processing_detail_chunk': 'Chunk {current}/{total}',
+        'voice.processing_detail_batch': 'Batch {current}/{total}',
+        'voice.processing_detail_batch_chunk': 'Batch {batchCurrent}/{batchTotal} · Chunk {chunkCurrent}/{chunkTotal}',
         'voice.result_title': 'Generated Voice',
         'voice.download_wav': 'Download WAV',
         'voice.new_clone': 'New Clone',
@@ -190,7 +194,11 @@ const translations = {
         'voice.generate': 'Generar Voz',
         'voice.save': 'Guardar Voz',
         'voice.processing_title': 'Generando voz clonada...',
-        'voice.processing_subtitle': 'Esto puede tardar unos segundos',
+        'voice.processing_subtitle': 'Esto puede tardar algo de tiempo en textos largos',
+        'voice.processing_detail_preparing': 'Preparando sintesis...',
+        'voice.processing_detail_chunk': 'Chunk {current}/{total}',
+        'voice.processing_detail_batch': 'Lote {current}/{total}',
+        'voice.processing_detail_batch_chunk': 'Lote {batchCurrent}/{batchTotal} · Chunk {chunkCurrent}/{chunkTotal}',
         'voice.result_title': 'Voz Generada',
         'voice.download_wav': 'Descargar WAV',
         'voice.new_clone': 'Nueva Clonaci\u00f3n',
@@ -350,6 +358,7 @@ const imageGenModeBtn = document.getElementById('imageGenModeBtn');
 const voiceCloneSection = document.getElementById('voiceCloneSection');
 const voiceCloneProcessing = document.getElementById('voiceCloneProcessing');
 const voiceCloneResults = document.getElementById('voiceCloneResults');
+const voiceProcessingDetail = document.getElementById('voiceProcessingDetail');
 const refUploadTab = document.getElementById('refUploadTab');
 const refRecordTab = document.getElementById('refRecordTab');
 const refUploadContent = document.getElementById('refUploadContent');
@@ -1478,15 +1487,24 @@ function renderSavedVoices() {
     noVoicesMessage.classList.add('hidden');
     savedVoicesList.innerHTML = savedVoices.map(voice => `
         <div class="saved-voice-item ${selectedVoiceId === voice.id ? 'selected' : ''}" data-voice-id="${escapeHtml(voice.id)}">
-            <div class="saved-voice-info">
-                <div class="saved-voice-name">${escapeHtml(voice.name)}</div>
-                <div class="saved-voice-meta">
-                    <span class="saved-voice-language">${escapeHtml(voice.language)}</span>
-                    <span class="saved-voice-date">${escapeHtml(formatDate(voice.created_at))}</span>
+            <label class="saved-voice-selector" for="savedVoice-${escapeHtml(voice.id)}">
+                <input
+                    class="saved-voice-radio"
+                    type="radio"
+                    id="savedVoice-${escapeHtml(voice.id)}"
+                    name="savedVoiceChoice"
+                    value="${escapeHtml(voice.id)}"
+                    ${selectedVoiceId === voice.id ? 'checked' : ''}
+                >
+                <div class="saved-voice-info">
+                    <div class="saved-voice-name">${escapeHtml(voice.name)}</div>
+                    <div class="saved-voice-meta">
+                        <span class="saved-voice-language">${escapeHtml(voice.language)}</span>
+                        <span class="saved-voice-date">${escapeHtml(formatDate(voice.created_at))}</span>
+                    </div>
                 </div>
-
-            </div>
-            <button class="btn-icon delete-voice-btn" title="${t('misc.delete_voice')}" data-voice-id="${escapeHtml(voice.id)}">
+            </label>
+            <button class="btn-icon delete-voice-btn" type="button" title="${t('misc.delete_voice')}" aria-label="${t('misc.delete_voice')}: ${escapeHtml(voice.name)}" data-voice-id="${escapeHtml(voice.id)}">
                 <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
                     <path d="M3 5H15M6 5V4C6 3.45 6.45 3 7 3H11C11.55 3 12 3.45 12 4V5M7 8V13M11 8V13M4 5L5 15C5 15.55 5.45 16 6 16H12C12.55 16 13 15.55 13 15L14 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
@@ -1494,12 +1512,9 @@ function renderSavedVoices() {
         </div>
     `).join('');
 
-    // Add click handlers
-    savedVoicesList.querySelectorAll('.saved-voice-item').forEach(item => {
-        item.addEventListener('click', (e) => {
-            if (!e.target.closest('.delete-voice-btn')) {
-                selectVoice(item.dataset.voiceId);
-            }
+    savedVoicesList.querySelectorAll('.saved-voice-radio').forEach(radio => {
+        radio.addEventListener('change', () => {
+            selectVoice(radio.value);
         });
     });
 
@@ -1522,6 +1537,9 @@ function selectVoice(voiceId) {
     savedVoicesList.querySelectorAll('.saved-voice-item').forEach(item => {
         item.classList.toggle('selected', item.dataset.voiceId === voiceId);
     });
+    savedVoicesList.querySelectorAll('.saved-voice-radio').forEach(radio => {
+        radio.checked = radio.value === voiceId;
+    });
 
     updateSynthesizeButton();
 }
@@ -1538,6 +1556,61 @@ function updateSavedVoiceCharCount() {
     const count = savedVoiceTargetText.value.length;
     savedVoiceCharCount.textContent = count;
     updateSynthesizeButton();
+}
+
+function interpolateTranslation(key, values) {
+    return t(key).replace(/\{(\w+)\}/g, (_match, token) => values[token] ?? '');
+}
+
+function setVoiceProcessingDetail(detail) {
+    if (voiceProcessingDetail) {
+        voiceProcessingDetail.textContent = detail || '';
+    }
+}
+
+function formatSynthProgressDetail(data, state) {
+    if (data.kind === 'chunk_plan' && Number.isInteger(data.batch_total)) {
+        state.batchTotal = data.batch_total;
+    }
+
+    if (data.kind === 'batch_start') {
+        state.batchCurrent = data.batch_index;
+        state.batchTotal = data.batch_total;
+    }
+
+    if (data.kind === 'chunk_progress') {
+        if (Number.isInteger(data.chunk_current)) {
+            state.chunkCurrent = data.chunk_current;
+        }
+        if (Number.isInteger(data.chunk_total)) {
+            state.chunkTotal = data.chunk_total;
+        }
+    }
+
+    if (Number.isInteger(state.batchCurrent) && Number.isInteger(state.batchTotal) && Number.isInteger(state.chunkCurrent) && Number.isInteger(state.chunkTotal)) {
+        return interpolateTranslation('voice.processing_detail_batch_chunk', {
+            batchCurrent: state.batchCurrent,
+            batchTotal: state.batchTotal,
+            chunkCurrent: state.chunkCurrent,
+            chunkTotal: state.chunkTotal,
+        });
+    }
+
+    if (Number.isInteger(state.batchCurrent) && Number.isInteger(state.batchTotal)) {
+        return interpolateTranslation('voice.processing_detail_batch', {
+            current: state.batchCurrent,
+            total: state.batchTotal,
+        });
+    }
+
+    if (Number.isInteger(state.chunkCurrent) && Number.isInteger(state.chunkTotal)) {
+        return interpolateTranslation('voice.processing_detail_chunk', {
+            current: state.chunkCurrent,
+            total: state.chunkTotal,
+        });
+    }
+
+    return data.message || t('voice.processing_detail_preparing');
 }
 
 // Synthesize with saved voice
@@ -1561,32 +1634,103 @@ async function synthesizeWithSavedVoice() {
     // Show processing
     voiceCloneSection.classList.add('hidden');
     voiceCloneProcessing.classList.remove('hidden');
+    setVoiceProcessingDetail(t('voice.processing_detail_preparing'));
 
     try {
         const formData = new FormData();
         formData.append('voice_id', selectedVoiceId);
         formData.append('target_text', targetText);
 
-        const response = await fetch('/api/synthesize', {
+        const response = await fetch('/api/synthesize/stream', {
             method: 'POST',
             body: formData,
         });
 
-        const result = await response.json();
-
         if (!response.ok) {
-            throw new Error(result.detail || t('toast.synth_error'));
+            let errorMessage = t('toast.synth_error');
+
+            try {
+                const errorResult = await response.json();
+                errorMessage = errorResult.detail || errorMessage;
+            } catch {
+                const errorText = await response.text();
+                if (errorText) {
+                    errorMessage = errorText;
+                }
+            }
+
+            throw new Error(errorMessage);
         }
 
-        if (!result.success) {
-            throw new Error(result.error || t('toast.synth_error'));
+        if (!response.body) {
+            throw new Error(t('toast.synth_error'));
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let completion = null;
+        const progressState = {
+            batchCurrent: null,
+            batchTotal: null,
+            chunkCurrent: null,
+            chunkTotal: null,
+        };
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) {
+                break;
+            }
+
+            buffer += decoder.decode(value, { stream: true });
+            const normalizedBuffer = buffer.replace(/\r\n/g, '\n');
+            const eventStrings = normalizedBuffer.split('\n\n');
+            buffer = eventStrings[eventStrings.length - 1];
+
+            for (let i = 0; i < eventStrings.length - 1; i++) {
+                const eventText = eventStrings[i];
+                if (!eventText.trim()) {
+                    continue;
+                }
+
+                const lines = eventText.split('\n');
+                let eventType = 'message';
+                let eventData = '';
+
+                for (const line of lines) {
+                    if (line.startsWith('event:')) {
+                        eventType = line.substring(6).trim();
+                    } else if (line.startsWith('data:')) {
+                        eventData = line.substring(5).trim();
+                    }
+                }
+
+                if (!eventData) {
+                    continue;
+                }
+
+                const data = JSON.parse(eventData);
+                if (eventType === 'progress') {
+                    setVoiceProcessingDetail(formatSynthProgressDetail(data, progressState));
+                } else if (eventType === 'error') {
+                    throw new Error(data.error || t('toast.synth_error'));
+                } else if (eventType === 'complete') {
+                    completion = data;
+                }
+            }
+        }
+
+        if (!completion || !completion.audio_session_id) {
+            throw new Error(t('toast.synth_error'));
         }
 
         // Show results
-        generatedAudioSessionId = result.audio_session_id;
-        generatedAudioPlayer.src = `/api/audio/${result.audio_session_id}`;
-        generatedDuration.textContent = formatDuration(result.duration || 0);
+        generatedAudioSessionId = completion.audio_session_id;
+        generatedAudioPlayer.src = `/api/audio/${completion.audio_session_id}`;
+        generatedDuration.textContent = formatDuration(completion.duration || 0);
 
+        setVoiceProcessingDetail('');
         voiceCloneProcessing.classList.add('hidden');
         voiceCloneResults.classList.remove('hidden');
 
@@ -1595,6 +1739,7 @@ async function synthesizeWithSavedVoice() {
     } catch (error) {
         console.error('Synthesize error:', error);
         showToast(error.message, 'error');
+        setVoiceProcessingDetail('');
         voiceCloneProcessing.classList.add('hidden');
         voiceCloneSection.classList.remove('hidden');
     }

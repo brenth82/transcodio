@@ -168,8 +168,8 @@
                     <!-- Saved Voices Mode -->
                     <div class="voice-mode-content active" id="savedVoiceModeContent">
                         <div class="saved-voices-container">
-                            <label class="form-label" data-i18n="voice.select_voice">Select a voice</label>
-                            <div class="saved-voices-list" id="savedVoicesList">
+                            <div class="form-label" id="savedVoicesLabel" data-i18n="voice.select_voice">Select a voice</div>
+                            <div class="saved-voices-list" id="savedVoicesList" role="radiogroup" aria-labelledby="savedVoicesLabel">
                                 <div class="loading-voices" data-i18n="voice.loading">Loading voices...</div>
                             </div>
                             <div class="no-voices-message hidden" id="noVoicesMessage">
@@ -316,7 +316,8 @@
                 <div class="processing-card">
                     <div class="spinner"></div>
                     <h3 data-i18n="voice.processing_title">Generating cloned voice...</h3>
-                    <p class="processing-status" data-i18n="voice.processing_subtitle">This may take a few seconds</p>
+                    <p class="processing-status" data-i18n="voice.processing_subtitle">This may take some time for longer texts</p>
+                    <p class="processing-detail" id="voiceProcessingDetail" role="status" aria-live="polite" aria-atomic="true"></p>
                 </div>
             </section>
 
@@ -449,7 +450,7 @@
     </div>
 
     <!-- Toast Notification -->
-    <div class="toast hidden" id="toast"></div>
+    <div class="toast hidden" id="toast" role="alert" aria-live="assertive" aria-atomic="true"></div>
 
     <script src="/static/app.js"></script>
 </body>
