@@ -4,7 +4,7 @@ import io
 import json
 import os
 import sys
-from typing import Iterator, Dict, Any
+from typing import Iterator, Dict, Any, Optional
 from pathlib import Path
 
 import modal
@@ -712,7 +712,7 @@ class SpeakerDiarizerModel:
 @app.cls(
     image=modal.Image.debian_slim(python_version="3.12"),
     volumes={"/models": volume},
-    scaledown_window=60,
+    scaledown_window=10,  # CPU-only container; aggressively terminate since voice saves are infrequent
 )
 class VoiceStorage:
     """Manage saved voices in Modal Volume."""
@@ -799,11 +799,22 @@ class VoiceStorage:
         self,
         voice_id: str,
         name: str,
-        ref_audio_bytes: bytes,
         ref_text: str,
         language: str,
+        prompt_bytes: bytes,
     ) -> Dict[str, Any]:
-        """Save a new voice."""
+        """Save a new voice with pre-computed voice prompt.
+        
+        Args:
+            voice_id: UUID for the voice
+            name: User-friendly name
+            ref_text: Reference audio transcription (for info only)
+            language: Voice language
+            prompt_bytes: Pre-computed torch-serialized VoiceClonePromptItem bytes
+        
+        Returns:
+            Success status with voice_id
+        """
         from datetime import datetime
 
         if not self._validate_voice_id(voice_id):
@@ -823,10 +834,10 @@ class VoiceStorage:
         voice_dir = voices_dir / voice_id
         voice_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save audio
-        audio_path = voice_dir / "ref_audio.wav"
-        with open(audio_path, "wb") as f:
-            f.write(ref_audio_bytes)
+        # Save voice prompt (no audio stored — prompt contains embeddings only)
+        prompt_path = voice_dir / "prompt.pt"
+        with open(prompt_path, "wb") as f:
+            f.write(prompt_bytes)
 
         # Save metadata
         metadata = {
@@ -837,7 +848,7 @@ class VoiceStorage:
             "created_at": datetime.utcnow().isoformat(),
         }
         metadata_path = voice_dir / "metadata.json"
-        with open(metadata_path, "w") as f:
+        with open(metadata_path, "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2)
 
         # Update index
@@ -849,9 +860,84 @@ class VoiceStorage:
             "created_at": metadata["created_at"],
         })
         self._save_index(index)
+        volume.commit()
 
         print(f"Voice saved: {name} ({voice_id})")
         return {"success": True, "voice_id": voice_id}
+
+    @modal.method()
+    def get_voice_with_prompt(self, voice_id: str) -> Dict[str, Any]:
+        """Get a voice by ID including metadata and cached voice prompt.
+
+        Returns metadata + prompt_bytes. For legacy voices created before prompt
+        caching, this may also include audio_bytes so callers can auto-migrate by
+        computing and saving prompt.pt on first synthesis.
+        """
+        if not self._validate_voice_id(voice_id):
+            return {"success": False, "error": "Invalid voice ID format"}
+
+        voices_dir = self._get_voices_dir()
+        voice_dir = voices_dir / voice_id
+
+        if not voice_dir.resolve().is_relative_to(voices_dir.resolve()):
+            return {"success": False, "error": "Invalid voice ID"}
+
+        if not voice_dir.exists():
+            return {"success": False, "error": "Voice not found"}
+
+        metadata_path = voice_dir / "metadata.json"
+        if not metadata_path.exists():
+            return {"success": False, "error": "Voice metadata not found"}
+
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+
+        # Load cached voice prompt
+        prompt_path = voice_dir / "prompt.pt"
+        prompt_bytes = None
+        if prompt_path.exists():
+            with open(prompt_path, "rb") as f:
+                prompt_bytes = f.read()
+
+        # Backward compatibility: old voices may still have ref_audio.wav.
+        audio_bytes = None
+        audio_path = voice_dir / "ref_audio.wav"
+        if audio_path.exists():
+            with open(audio_path, "rb") as f:
+                audio_bytes = f.read()
+
+        # If neither prompt nor audio exists, the voice is unusable.
+        if prompt_bytes is None and audio_bytes is None:
+            return {"success": False, "error": "Voice prompt not found"}
+
+        return {
+            "success": True,
+            "metadata": metadata,
+            "prompt_bytes": prompt_bytes,
+            "audio_bytes": audio_bytes,
+        }
+
+    @modal.method()
+    def save_voice_prompt(self, voice_id: str, prompt_bytes: bytes) -> Dict[str, Any]:
+        """Save precomputed voice prompt bytes for faster future synthesis."""
+        if not self._validate_voice_id(voice_id):
+            return {"success": False, "error": "Invalid voice ID format"}
+
+        voices_dir = self._get_voices_dir()
+        voice_dir = voices_dir / voice_id
+
+        if not voice_dir.resolve().is_relative_to(voices_dir.resolve()):
+            return {"success": False, "error": "Invalid voice ID"}
+
+        if not voice_dir.exists():
+            return {"success": False, "error": "Voice not found"}
+
+        prompt_path = voice_dir / "prompt.pt"
+        with open(prompt_path, "wb") as f:
+            f.write(prompt_bytes)
+        volume.commit()
+        print(f"Voice prompt cached: {voice_id}")
+        return {"success": True}
 
     @modal.method()
     def delete_voice(self, voice_id: str) -> Dict[str, Any]:
@@ -886,7 +972,7 @@ class VoiceStorage:
 @app.cls(
     image=qwen_tts_image,
     gpu=TTS_MODELS["qwen"]["gpu_type"],
-    scaledown_window=TTS_CONTAINER_IDLE_TIMEOUT,
+    scaledown_window=30,  # Aggressive: terminate 30s after last request (saves cost for personal use)
     timeout=TTS_TIMEOUT,
     memory=TTS_MODELS["qwen"]["memory_mb"],
     volumes={"/models": volume},
@@ -900,6 +986,7 @@ class Qwen3TTSVoiceCloner:
         import torch
         import time
         import os
+        import inspect
 
         model_config = TTS_MODELS["qwen"]
         start_time = time.time()
@@ -929,51 +1016,67 @@ class Qwen3TTSVoiceCloner:
             f"size_mb={before_bytes / (1024 * 1024):.1f}"
         )
 
-        import warnings
-        warnings.filterwarnings("ignore", message="FNV hashing is not implemented in Numba", category=UserWarning)
-        warnings.filterwarnings(
-            "ignore",
-            message=r"`torch_dtype` is deprecated! Use `dtype` instead!",
-            category=Warning,
-        )
-        warnings.filterwarnings(
-            "ignore",
-            message=r"You are attempting to use Flash Attention 2 without specifying a torch dtype.*",
-            category=Warning,
-        )
         from qwen_tts import Qwen3TTSModel
 
-        model_kwargs = {
+        # Qwen3-TTS forwards kwargs through to AutoModel.from_pretrained(...).
+        # Prefer dtype first for flash-attn to avoid torch_dtype deprecation and
+        # FA2 "dtype not specified" warnings seen in container logs.
+        model_kwargs_dtype = {
             "device_map": "cuda:0",
-            # Keep explicit dtype to ensure bfloat16 inference on CUDA.
             "dtype": torch.bfloat16,
         }
-        # Some upstream loaders still inspect torch_dtype for FlashAttention2.
-        flash_model_kwargs = {
-            **model_kwargs,
+        model_kwargs_torch_dtype = {
+            "device_map": "cuda:0",
             "torch_dtype": torch.bfloat16,
         }
 
+        from_pretrained_sig = inspect.signature(Qwen3TTSModel.from_pretrained)
+        print(f"Qwen3TTSModel.from_pretrained signature: {from_pretrained_sig}")
+
         try:
             import flash_attn  # noqa: F401
-            print("flash-attn detected; attempting flash_attention_2")
-            self.model = Qwen3TTSModel.from_pretrained(
-                model_config["model_id"],
-                attn_implementation="flash_attention_2",
-                **flash_model_kwargs
-            )
+            print("flash-attn detected; trying attn_implementation=flash_attention_2")
+            try:
+                self.model = Qwen3TTSModel.from_pretrained(
+                    model_config["model_id"],
+                    attn_implementation="flash_attention_2",
+                    **model_kwargs_dtype,
+                )
+                print("flash-attn enabled with dtype=bfloat16")
+            except Exception as flash_td_error:
+                print(f"flash-attn + dtype path failed ({flash_td_error}); retrying with torch_dtype")
+                self.model = Qwen3TTSModel.from_pretrained(
+                    model_config["model_id"],
+                    attn_implementation="flash_attention_2",
+                    **model_kwargs_torch_dtype,
+                )
+                print("flash-attn enabled with torch_dtype=bfloat16")
         except ImportError:
             print("flash-attn not installed; loading Qwen3-TTS without flash attention")
-            self.model = Qwen3TTSModel.from_pretrained(
-                model_config["model_id"],
-                **model_kwargs
-            )
-        except TypeError:
-            print("Qwen3-TTS loader does not accept attn_implementation; falling back")
-            self.model = Qwen3TTSModel.from_pretrained(
-                model_config["model_id"],
-                **model_kwargs
-            )
+            try:
+                self.model = Qwen3TTSModel.from_pretrained(
+                    model_config["model_id"],
+                    **model_kwargs_dtype,
+                )
+            except TypeError as td_error:
+                print(f"dtype path failed without flash-attn ({td_error}); retrying with torch_dtype")
+                self.model = Qwen3TTSModel.from_pretrained(
+                    model_config["model_id"],
+                    **model_kwargs_torch_dtype,
+                )
+        except Exception as flash_type_error:
+            print(f"flash-attn path failed ({flash_type_error}); falling back to default attention")
+            try:
+                self.model = Qwen3TTSModel.from_pretrained(
+                    model_config["model_id"],
+                    **model_kwargs_dtype,
+                )
+            except TypeError as fallback_td_error:
+                print(f"fallback dtype path failed ({fallback_td_error}); retrying with torch_dtype")
+                self.model = Qwen3TTSModel.from_pretrained(
+                    model_config["model_id"],
+                    **model_kwargs_torch_dtype,
+                )
 
         # Ensure inference-only behavior.
         if hasattr(self.model, "eval"):
@@ -997,24 +1100,220 @@ class Qwen3TTSVoiceCloner:
         print(f"Qwen3-TTS model loaded in {load_time:.2f}s")
 
     @modal.method()
-    def generate_voice_clone(
+    def compute_voice_prompt(
         self,
         ref_audio_bytes: bytes,
         ref_text: str,
+        language: str = "English",
+    ) -> bytes:
+        """
+        Pre-compute and serialize a voice prompt for reuse.
+
+        Computes VoiceClonePromptItem (embeddings + speech tokens) from reference audio
+        and transcription. Result is torch.save'd to bytes for storage in Modal Volume.
+
+        Args:
+            ref_audio_bytes: Reference audio bytes (WAV format, 24kHz mono)
+            ref_text: Transcription of the reference audio (required for ICL mode)
+            language: Voice language (for logging)
+
+        Returns:
+            Serialized bytes of List[VoiceClonePromptItem] ready to cache and reuse
+        """
+        import io
+        import tempfile
+        import torch
+
+        try:
+            # Write reference audio to temp file
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_ref:
+                tmp_ref.write(ref_audio_bytes)
+                ref_audio_path = tmp_ref.name
+
+            # Compute voice prompt with ICL mode (requires ref_text)
+            effective_ref_text = ref_text.strip() if ref_text else None
+            voice_prompt_items = self.model.create_voice_clone_prompt(
+                ref_audio_path, effective_ref_text
+            )
+
+            # Serialize for storage
+            buf = io.BytesIO()
+            torch.save(voice_prompt_items, buf)
+            prompt_bytes = buf.getvalue()
+            buf.close()
+
+            print(
+                f"Voice prompt computed: language={language} "
+                f"mode={'icl' if effective_ref_text else 'x_vector_only'} "
+                f"size_bytes={len(prompt_bytes)}"
+            )
+            return prompt_bytes
+
+        finally:
+            # Clean up temp file
+            import os
+            if 'ref_audio_path' in locals() and os.path.exists(ref_audio_path):
+                try:
+                    os.unlink(ref_audio_path)
+                except OSError:
+                    pass
+
+    @modal.method()
+    def generate_voice_clone_stream(
+        self,
+        ref_audio_bytes: Optional[bytes],
+        ref_text: str,
         target_text: str,
-        language: str
+        language: str,
+        request_trace: str = "",
+        voice_prompt_bytes: Optional[bytes] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """Stream live synthesis status lines and final result.
+
+        This wraps generate_voice_clone and forwards log/status lines while the
+        synthesis worker is running, then yields a final `complete` event with
+        the same result payload as generate_voice_clone.
+        """
+        import queue
+        import threading
+        import sys
+        import time
+
+        log_queue: "queue.Queue[str]" = queue.Queue()
+        result_holder: Dict[str, Any] = {}
+        error_holder: Dict[str, str] = {}
+
+        class _QueueWriter:
+            def __init__(self):
+                self._buf = ""
+
+            def write(self, text: str) -> int:
+                if not text:
+                    return 0
+                self._buf += text
+                while "\n" in self._buf:
+                    line, self._buf = self._buf.split("\n", 1)
+                    line = line.strip()
+                    if line:
+                        log_queue.put(line)
+                return len(text)
+
+            def flush(self) -> None:
+                if self._buf.strip():
+                    log_queue.put(self._buf.strip())
+                self._buf = ""
+
+        def _worker() -> None:
+            writer = _QueueWriter()
+            old_stdout = sys.stdout
+            old_stderr = sys.stderr
+            sys.stdout = writer
+            sys.stderr = writer
+            try:
+                result_holder["result"] = self._generate_voice_clone_impl(
+                    ref_audio_bytes,
+                    ref_text,
+                    target_text,
+                    language,
+                    request_trace,
+                    voice_prompt_bytes,
+                )
+            except Exception as e:
+                error_holder["error"] = str(e)
+            finally:
+                try:
+                    writer.flush()
+                except Exception:
+                    pass
+                sys.stdout = old_stdout
+                sys.stderr = old_stderr
+
+        yield {
+            "type": "status",
+            "stage": "start",
+            "message": f"[tts:{request_trace or 'modal'}] synthesis started",
+        }
+
+        worker = threading.Thread(target=_worker, daemon=True)
+        worker.start()
+
+        while worker.is_alive() or not log_queue.empty():
+            try:
+                line = log_queue.get(timeout=0.25)
+                yield {
+                    "type": "status",
+                    "stage": "progress",
+                    "message": line,
+                }
+            except queue.Empty:
+                continue
+
+        if "error" in error_holder:
+            yield {
+                "type": "error",
+                "error": error_holder["error"],
+            }
+            return
+
+        result = result_holder.get("result")
+        if result is None:
+            yield {
+                "type": "error",
+                "error": "Synthesis worker ended without a result",
+            }
+            return
+
+        yield {
+            "type": "complete",
+            "result": result,
+        }
+
+    @modal.method()
+    def generate_voice_clone(
+        self,
+        ref_audio_bytes: Optional[bytes],
+        ref_text: str,
+        target_text: str,
+        language: str,
+        request_trace: str = "",
+        voice_prompt_bytes: Optional[bytes] = None,
+    ) -> Dict[str, Any]:
+        """Generate audio with cloned voice."""
+        return self._generate_voice_clone_impl(
+            ref_audio_bytes,
+            ref_text,
+            target_text,
+            language,
+            request_trace,
+            voice_prompt_bytes,
+        )
+
+    def _generate_voice_clone_impl(
+        self,
+        ref_audio_bytes: Optional[bytes],
+        ref_text: str,
+        target_text: str,
+        language: str,
+        request_trace: str = "",
+        voice_prompt_bytes: Optional[bytes] = None,
     ) -> Dict[str, Any]:
         """
         Generate audio with cloned voice.
 
         Args:
-            ref_audio_bytes: Reference audio bytes (WAV format)
-            ref_text: Transcription of the reference audio
+            ref_audio_bytes: Reference audio bytes (WAV format); may be None when
+                voice_prompt_bytes is provided (cached prompt already encodes the speaker).
+            ref_text: Transcription of the reference audio. Empty string triggers
+                x_vector_only_mode (speaker-embedding-only, no ICL codes).
             target_text: Text to synthesize with cloned voice
             language: Target language
+            request_trace: Optional trace ID for correlated logging.
+            voice_prompt_bytes: Pre-serialized List[VoiceClonePromptItem] from a previous
+                call. When present, ref_audio/ref_text processing is bypassed entirely.
 
         Returns:
-            Dict with audio_bytes and metadata
+            Dict with audio_bytes, metadata, and prompt_bytes (populated only when a new
+            voice prompt was computed; None when an existing cache was used).
         """
         import io
         import soundfile as sf
@@ -1087,9 +1386,71 @@ class Qwen3TTSVoiceCloner:
             # 3. URLs and emails
             # ------------------------------------------------------------------ #
             text = re.sub(r"https?://[^\s,;)\"']+", "link", text)
+
+            def _expand_alnum_token(token: str) -> str:
+                """Expand mixed alphanumeric tokens into speakable chunks."""
+                pieces: list[str] = []
+                for part in re.findall(r"[A-Za-z]+|\d+", token):
+                    if part.isdigit():
+                        pieces.extend(num2words(int(d), lang=nw_lang) for d in part)
+                    else:
+                        pieces.append(part)
+                return " ".join(pieces) if pieces else token
+
+            def _expand_email(m: re.Match) -> str:
+                raw = m.group(0)
+                local, domain = raw.split("@", 1)
+
+                def _expand_local(local_part: str) -> str:
+                    chunks: list[str] = []
+                    token = ""
+                    for ch in local_part:
+                        if ch.isalnum():
+                            token += ch
+                            continue
+                        if token:
+                            chunks.append(_expand_alnum_token(token))
+                            token = ""
+                        if ch == ".":
+                            chunks.append("dot")
+                        elif ch == "_":
+                            chunks.append("underscore")
+                        elif ch == "-":
+                            chunks.append("dash")
+                        elif ch == "+":
+                            chunks.append("plus")
+                    if token:
+                        chunks.append(_expand_alnum_token(token))
+                    return " ".join(chunks)
+
+                def _expand_domain(domain_part: str) -> str:
+                    labels = [lbl for lbl in domain_part.split(".") if lbl]
+                    spoken_labels = []
+                    for label in labels:
+                        label_chunks: list[str] = []
+                        token = ""
+                        for ch in label:
+                            if ch.isalnum():
+                                token += ch
+                                continue
+                            if token:
+                                label_chunks.append(_expand_alnum_token(token))
+                                token = ""
+                            if ch == "-":
+                                label_chunks.append("dash")
+                            elif ch == "_":
+                                label_chunks.append("underscore")
+                        if token:
+                            label_chunks.append(_expand_alnum_token(token))
+                        spoken_labels.append(" ".join(label_chunks) if label_chunks else label)
+                    return " dot ".join(spoken_labels)
+
+                return f"{_expand_local(local)} at {_expand_domain(domain)}"
+
             text = re.sub(
-                r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Z|a-z]{2,}\b",
-                "email address", text,
+                r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b",
+                _expand_email,
+                text,
             )
 
             # ------------------------------------------------------------------ #
@@ -1714,19 +2075,50 @@ class Qwen3TTSVoiceCloner:
         try:
             start_time = time.time()
             t0 = time.perf_counter()
+            trace = request_trace or "modal"
 
-            # Save reference audio to temp file
+            def _status(message: str) -> None:
+                print(f"[tts:{trace}] {message}")
+
+            # ------------------------------------------------------------------
+            # Voice prompt setup: use pre-serialised cache or compute fresh.
+            # ------------------------------------------------------------------
             t_write_ref_start = time.perf_counter()
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_ref:
-                tmp_ref.write(ref_audio_bytes)
-                ref_audio_path = tmp_ref.name
+            new_prompt_bytes: Optional[bytes] = None  # set only when newly computed
+
+            if voice_prompt_bytes is not None:
+                # Fast path: deserialise cached VoiceClonePromptItem list.
+                voice_prompt_items = torch.load(
+                    io.BytesIO(voice_prompt_bytes),
+                    map_location="cuda:0",
+                    weights_only=False,
+                )
+                _status("voice-prompt cache_hit")
+            else:
+                # Write reference audio to temp file for speaker/ICL encoding.
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_ref:
+                    tmp_ref.write(ref_audio_bytes)
+                    ref_audio_path = tmp_ref.name
+                # Compute voice prompt. Empty ref_text → x_vector_only_mode (speaker
+                # embedding only; no ICL codes needed).
+                effective_ref_text = ref_text.strip() if ref_text else None
+                voice_prompt_items = self.model.create_voice_clone_prompt(
+                    ref_audio_path, effective_ref_text
+                )
+                # Serialise for caller to cache.
+                buf = io.BytesIO()
+                torch.save(voice_prompt_items, buf)
+                new_prompt_bytes = buf.getvalue()
+                mode_label = "icl" if effective_ref_text else "x_vector_only"
+                _status(f"voice-prompt computed mode={mode_label}")
+
             t_write_ref = time.perf_counter() - t_write_ref_start
 
-            print(f"Generating voice clone for {len(target_text)} chars in {language}...")
+            _status(f"start chars={len(target_text)} language={language}")
 
             # Stage 1: document preparation before chunking.
             target_text = _prepare_text_for_tts_document(target_text, language)
-            print(f"Text after document prep: {len(target_text)} chars")
+            _status(f"document-prep chars={len(target_text)}")
 
             if TTS_ENABLE_CHUNKING:
                 tagged_chunks = _chunk_text(target_text, TTS_CHUNK_MAX_WORDS, TTS_SHORT_SENTENCE_WORDS)
@@ -1738,14 +2130,39 @@ class Qwen3TTSVoiceCloner:
             boundaries = [b for _, b in tagged_chunks]
 
             batch_size = max(1, TTS_BATCH_SIZE if TTS_ENABLE_BATCHING else 1)
+            total_chunks = len(chunks)
+            planned_batch_sizes = [
+                len(chunks[i:i + batch_size])
+                for i in range(0, total_chunks, batch_size)
+            ]
+            total_batches = len(planned_batch_sizes)
+            configured_concurrency = batch_size if TTS_ENABLE_BATCHING else 1
             print(
                 "TTS chunking config: "
                 f"enabled={TTS_ENABLE_CHUNKING}, "
-                f"chunks={len(chunks)}, "
+                f"chunks={total_chunks}, "
                 f"max_words={TTS_CHUNK_MAX_WORDS}, "
                 f"batching={TTS_ENABLE_BATCHING}, "
-                f"batch_size={batch_size}"
+                f"batch_size={batch_size}, "
+                f"planned_batches={total_batches}, "
+                f"planned_batch_sizes={planned_batch_sizes}, "
+                f"configured_max_concurrency={configured_concurrency}"
             )
+            _status(
+                f"chunk-plan chunks={total_chunks} batch_size={batch_size} "
+                f"planned_batches={total_batches}"
+            )
+
+            telemetry_events: list[dict[str, Any]] = []
+            telemetry_events.append({
+                "type": "chunk_plan",
+                "chunks_total": total_chunks,
+                "batch_size": batch_size,
+                "batching_enabled": TTS_ENABLE_BATCHING,
+                "planned_batches": total_batches,
+                "planned_batch_sizes": planned_batch_sizes,
+                "configured_max_concurrency": configured_concurrency,
+            })
 
             # Inference mode avoids autograd overhead and keeps output quality unchanged.
             if torch.cuda.is_available():
@@ -1756,16 +2173,44 @@ class Qwen3TTSVoiceCloner:
                 sr = None
                 batched_requests = 0
                 batch_fallbacks = 0
-                for i in range(0, len(chunks), batch_size):
+                completed_chunks = 0
+                effective_max_concurrency = 1
+                fallback_chunks = 0
+                for i in range(0, total_chunks, batch_size):
                     batch_texts = chunks[i:i + batch_size]
+                    batch_index = (i // batch_size) + 1
+                    batch_start_chunk = i + 1
+                    batch_end_chunk = i + len(batch_texts)
+
+                    _status(
+                        f"batch-start index={batch_index}/{total_batches} "
+                        f"chunks={batch_start_chunk}-{batch_end_chunk} "
+                        f"size={len(batch_texts)}"
+                    )
+
+                    telemetry_events.append({
+                        "type": "batch_start",
+                        "batch_index": batch_index,
+                        "batches_total": total_batches,
+                        "batch_chunk_count": len(batch_texts),
+                        "chunk_range": [batch_start_chunk, batch_end_chunk],
+                    })
+
                     if TTS_ENABLE_BATCHING and len(batch_texts) > 1:
                         try:
                             batched_requests += 1
+                            effective_max_concurrency = max(effective_max_concurrency, len(batch_texts))
+                            telemetry_events.append({
+                                "type": "batch_call",
+                                "batch_index": batch_index,
+                                "mode": "batched",
+                                "in_flight_chunks": len(batch_texts),
+                                "chunk_range": [batch_start_chunk, batch_end_chunk],
+                            })
                             batch_wavs_obj, batch_sr = self.model.generate_voice_clone(
                                 text=batch_texts,
                                 language=language,
-                                ref_audio=ref_audio_path,
-                                ref_text=ref_text,
+                                voice_clone_prompt=voice_prompt_items,
                             )
                             batch_wavs = _normalize_wavs(batch_wavs_obj)
                             if len(batch_wavs) != len(batch_texts):
@@ -1774,25 +2219,86 @@ class Qwen3TTSVoiceCloner:
                                 )
                             all_wavs.extend(batch_wavs)
                             sr = sr or batch_sr
+
+                            for rel_idx in range(len(batch_wavs)):
+                                completed_chunks += 1
+                                progress_pct = (completed_chunks / total_chunks) * 100 if total_chunks else 100.0
+                                _status(
+                                    f"progress {completed_chunks}/{total_chunks} "
+                                    f"({progress_pct:.1f}%) mode=batched"
+                                )
+                                telemetry_events.append({
+                                    "type": "chunk_complete",
+                                    "chunk_index": i + rel_idx + 1,
+                                    "chunks_completed": completed_chunks,
+                                    "chunks_total": total_chunks,
+                                    "batch_index": batch_index,
+                                    "mode": "batched",
+                                    "in_flight_chunks": len(batch_texts),
+                                })
                             continue
                         except Exception as batch_error:
                             batch_fallbacks += 1
+                            _status(
+                                f"batch-fallback index={batch_index} reason={batch_error}"
+                            )
+                            telemetry_events.append({
+                                "type": "batch_fallback",
+                                "batch_index": batch_index,
+                                "chunk_range": [batch_start_chunk, batch_end_chunk],
+                                "batch_chunk_count": len(batch_texts),
+                                "reason": str(batch_error),
+                            })
                             print(
                                 "Batched Qwen generation unavailable for this request; "
                                 f"falling back to per-chunk calls ({batch_error})"
                             )
+                    else:
+                        telemetry_events.append({
+                            "type": "batch_call",
+                            "batch_index": batch_index,
+                            "mode": "single",
+                            "in_flight_chunks": 1,
+                            "chunk_range": [batch_start_chunk, batch_end_chunk],
+                            "reason": "batching_disabled_or_single_chunk_batch",
+                        })
 
                     # Safe fallback: synthesize each chunk independently.
-                    for chunk_text in batch_texts:
+                    for rel_idx, chunk_text in enumerate(batch_texts):
                         chunk_wavs_obj, chunk_sr = self.model.generate_voice_clone(
                             text=chunk_text,
                             language=language,
-                            ref_audio=ref_audio_path,
-                            ref_text=ref_text,
+                            voice_clone_prompt=voice_prompt_items,
                         )
                         chunk_wavs = _normalize_wavs(chunk_wavs_obj)
                         all_wavs.append(chunk_wavs[0])
                         sr = sr or chunk_sr
+                        completed_chunks += 1
+                        fallback_chunks += 1
+                        progress_pct = (completed_chunks / total_chunks) * 100 if total_chunks else 100.0
+                        _status(
+                            f"progress {completed_chunks}/{total_chunks} "
+                            f"({progress_pct:.1f}%) mode=single"
+                        )
+                        telemetry_events.append({
+                            "type": "chunk_complete",
+                            "chunk_index": i + rel_idx + 1,
+                            "chunks_completed": completed_chunks,
+                            "chunks_total": total_chunks,
+                            "batch_index": batch_index,
+                            "mode": "single",
+                            "in_flight_chunks": 1,
+                        })
+
+                telemetry_events.append({
+                    "type": "chunk_summary",
+                    "chunks_total": total_chunks,
+                    "chunks_completed": completed_chunks,
+                    "batched_requests": batched_requests,
+                    "batch_fallbacks": batch_fallbacks,
+                    "fallback_chunks": fallback_chunks,
+                    "effective_max_concurrency": effective_max_concurrency,
+                })
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             t_infer = time.perf_counter() - t_infer_start
@@ -1852,8 +2358,9 @@ class Qwen3TTSVoiceCloner:
 
             # Cleanup temp input file
             t_cleanup_start = time.perf_counter()
-            os.unlink(ref_audio_path)
-            ref_audio_path = None
+            if ref_audio_path and os.path.exists(ref_audio_path):
+                os.unlink(ref_audio_path)
+                ref_audio_path = None
             t_cleanup = time.perf_counter() - t_cleanup_start
 
             generation_time = time.time() - start_time
@@ -1863,6 +2370,7 @@ class Qwen3TTSVoiceCloner:
             x_realtime = duration / t_infer if t_infer > 0 else float("inf")
 
             print(f"Voice clone generated in {generation_time:.2f}s, duration: {duration:.2f}s")
+            _status(f"complete generation_time={generation_time:.2f}s duration={duration:.2f}s")
             print(
                 "TTS timing breakdown: "
                 f"write_ref={t_write_ref:.3f}s, "
@@ -1875,9 +2383,11 @@ class Qwen3TTSVoiceCloner:
                 "TTS performance: "
                 f"rtf={rtf:.3f}, "
                 f"x_realtime={x_realtime:.2f}x, "
-                f"chunks={len(chunks)}, "
+                f"chunks={total_chunks}, "
                 f"batched_requests={batched_requests}, "
-                f"batch_fallbacks={batch_fallbacks}"
+                f"batch_fallbacks={batch_fallbacks}, "
+                f"fallback_chunks={fallback_chunks}, "
+                f"effective_max_concurrency={effective_max_concurrency}"
             )
 
             return {
@@ -1885,11 +2395,27 @@ class Qwen3TTSVoiceCloner:
                 "audio_bytes": audio_bytes,
                 "duration": duration,
                 "sample_rate": sr,
+                "prompt_bytes": new_prompt_bytes,
+                "tts_telemetry": {
+                    "chunks_total": total_chunks,
+                    "planned_batches": total_batches,
+                    "planned_batch_sizes": planned_batch_sizes,
+                    "batch_size": batch_size,
+                    "batching_enabled": TTS_ENABLE_BATCHING,
+                    "configured_max_concurrency": configured_concurrency,
+                    "effective_max_concurrency": effective_max_concurrency,
+                    "batched_requests": batched_requests,
+                    "batch_fallbacks": batch_fallbacks,
+                    "fallback_chunks": fallback_chunks,
+                    "events": telemetry_events,
+                },
             }
 
         except Exception as e:
             import traceback
+            trace = request_trace or "modal"
             print(f"Voice clone error: {e}")
+            print(f"[tts:{trace}] error: {e}")
             print(traceback.format_exc())
             return {
                 "success": False,

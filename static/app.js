@@ -1162,13 +1162,13 @@ async function generateVoiceClone() {
         return;
     }
 
+    const targetText = targetTextInput.value.trim();
     const refText = refTextInput.value.trim();
     if (!refText) {
         showToast(t('toast.no_ref_text'), 'error');
         return;
     }
 
-    const targetText = targetTextInput.value.trim();
     if (!targetText) {
         showToast(t('toast.no_target_text'), 'error');
         return;
@@ -1484,7 +1484,7 @@ function renderSavedVoices() {
                     <span class="saved-voice-language">${escapeHtml(voice.language)}</span>
                     <span class="saved-voice-date">${escapeHtml(formatDate(voice.created_at))}</span>
                 </div>
-                <div class="saved-voice-ref-text">"${escapeHtml(truncateText(voice.ref_text, 60))}"</div>
+
             </div>
             <button class="btn-icon delete-voice-btn" title="${t('misc.delete_voice')}" data-voice-id="${escapeHtml(voice.id)}">
                 <svg width="18" height="18" viewBox="0 0 18 18" fill="none">

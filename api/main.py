@@ -72,6 +72,79 @@ def _validate_uuid(value: str, name: str = "ID") -> None:
     if not UUID_PATTERN.match(value):
         raise HTTPException(status_code=400, detail=f"Invalid {name} format")
 
+def _log_tts_telemetry(trace_id: str, telemetry: Optional[dict]) -> None:
+    """Emit structured TTS chunk/batch telemetry into API logs."""
+    def _emit(level: str, message: str, *args) -> None:
+        formatted = message % args if args else message
+        # Explicit console visibility even when logging config suppresses INFO.
+        print(formatted, flush=True)
+        if level == "warning":
+            logger.warning(message, *args)
+        else:
+            logger.info(message, *args)
+
+    if not telemetry:
+        _emit("info", "[tts:%s] telemetry unavailable", trace_id)
+        return
+
+    _emit(
+        "info",
+        "[tts:%s] plan chunks_total=%s planned_batches=%s planned_batch_sizes=%s "
+        "batch_size=%s batching_enabled=%s configured_max_concurrency=%s",
+        trace_id,
+        telemetry.get("chunks_total"),
+        telemetry.get("planned_batches"),
+        telemetry.get("planned_batch_sizes"),
+        telemetry.get("batch_size"),
+        telemetry.get("batching_enabled"),
+        telemetry.get("configured_max_concurrency"),
+    )
+
+    for event in telemetry.get("events", []):
+        event_type = event.get("type")
+        if event_type == "batch_start":
+            _emit(
+                "info",
+                "[tts:%s] batch start batch=%s/%s chunk_range=%s size=%s",
+                trace_id,
+                event.get("batch_index"),
+                event.get("batches_total"),
+                event.get("chunk_range"),
+                event.get("batch_chunk_count"),
+            )
+        if event_type == "chunk_complete":
+            _emit(
+                "info",
+                "[tts:%s] chunk complete chunk=%s/%s mode=%s in_flight=%s batch=%s",
+                trace_id,
+                event.get("chunks_completed"),
+                event.get("chunks_total"),
+                event.get("mode"),
+                event.get("in_flight_chunks"),
+                event.get("batch_index"),
+            )
+        elif event_type == "batch_fallback":
+            _emit(
+                "warning",
+                "[tts:%s] batch fallback batch=%s chunk_range=%s size=%s reason=%s",
+                trace_id,
+                event.get("batch_index"),
+                event.get("chunk_range"),
+                event.get("batch_chunk_count"),
+                event.get("reason"),
+            )
+
+    _emit(
+        "info",
+        "[tts:%s] summary batched_requests=%s batch_fallbacks=%s fallback_chunks=%s "
+        "effective_max_concurrency=%s",
+        trace_id,
+        telemetry.get("batched_requests"),
+        telemetry.get("batch_fallbacks"),
+        telemetry.get("fallback_chunks"),
+        telemetry.get("effective_max_concurrency"),
+    )
+
 async def verify_api_key(request: Request):
     """Verify API key if configured. Skip for public routes."""
     # No auth required if API_KEY is not configured (dev mode)
@@ -541,7 +614,7 @@ async def transcribe_audio_stream(
 async def voice_clone(
     request: Request,
     ref_audio: UploadFile = File(..., description="Reference audio file (3-30 seconds)"),
-    ref_text: str = Form(..., description="Transcription of the reference audio"),
+    ref_text: str = Form(default="", description="Transcription of the reference audio (optional; omit to use speaker-embedding-only mode)"),
     target_text: str = Form(..., description="Text to synthesize with cloned voice"),
     language: str = Form(default="Spanish", description="Target language"),
     tts_model: str = Form(default=config.DEFAULT_TTS_MODEL, description="TTS model to use"),
@@ -580,7 +653,7 @@ async def voice_clone(
     try:
         request_trace = uuid.uuid4().hex[:8]
         t_request_start = time.perf_counter()
-        print(f"[voice-clone:{request_trace}] request started")
+        logger.info("[voice-clone:%s] request started", request_trace)
 
         # Validate language
         if language not in config.VOICE_CLONE_LANGUAGES:
@@ -602,15 +675,9 @@ async def voice_clone(
                 detail="Target text cannot be empty."
             )
 
-        # Validate reference text
-        if len(ref_text.strip()) == 0:
-            raise HTTPException(
-                status_code=400,
-                detail="Reference text cannot be empty."
-            )
-
         # Read reference audio
         t_read_start = time.perf_counter()
+        logger.info("[voice-clone:%s] reading reference audio", request_trace)
         ref_audio_bytes = await ref_audio.read()
         file_size = len(ref_audio_bytes)
         t_read = time.perf_counter() - t_read_start
@@ -625,6 +692,7 @@ async def voice_clone(
         # Preprocess reference audio (convert to 24kHz mono WAV)
         try:
             t_preprocess_start = time.perf_counter()
+            logger.info("[voice-clone:%s] validating and preprocessing reference audio", request_trace)
             ref_duration, preprocessed_ref = validate_audio_file(
                 filename=ref_audio.filename,
                 file_size=file_size,
@@ -654,6 +722,7 @@ async def voice_clone(
             import modal
 
             t_modal_lookup_start = time.perf_counter()
+            logger.info("[voice-clone:%s] resolving Modal class %s", request_trace, "Qwen3TTSVoiceCloner")
             TTSModel = modal.Cls.from_name(config.MODAL_APP_NAME, "Qwen3TTSVoiceCloner")
             model = TTSModel()
             t_modal_lookup = time.perf_counter() - t_modal_lookup_start
@@ -666,11 +735,13 @@ async def voice_clone(
         # Generate voice clone
         try:
             t_remote_start = time.perf_counter()
+            logger.info("[voice-clone:%s] invoking Modal TTS (chars=%s, language=%s)", request_trace, len(target_text), language)
             result = await model.generate_voice_clone.remote.aio(
                 preprocessed_ref,
                 ref_text,
                 target_text,
-                language
+                language,
+                request_trace,
             )
             t_remote = time.perf_counter() - t_remote_start
 
@@ -679,6 +750,8 @@ async def voice_clone(
                     status_code=500,
                     detail=f"Voice cloning failed: {result.get('error', 'Unknown error')}"
                 )
+
+            _log_tts_telemetry(request_trace, result.get("tts_telemetry"))
 
             # Generate session ID and cache the generated audio
             t_cache_start = time.perf_counter()
@@ -696,10 +769,16 @@ async def voice_clone(
             t_cache = time.perf_counter() - t_cache_start
 
             t_total = time.perf_counter() - t_request_start
-            print(
-                f"[voice-clone:{request_trace}] timing read={t_read:.3f}s "
-                f"preprocess={t_preprocess:.3f}s modal_lookup={t_modal_lookup:.3f}s "
-                f"remote_tts={t_remote:.3f}s cache={t_cache:.3f}s total={t_total:.3f}s"
+            logger.info(
+                "[voice-clone:%s] timing read=%.3fs preprocess=%.3fs modal_lookup=%.3fs "
+                "remote_tts=%.3fs cache=%.3fs total=%.3fs",
+                request_trace,
+                t_read,
+                t_preprocess,
+                t_modal_lookup,
+                t_remote,
+                t_cache,
+                t_total,
             )
 
             return VoiceCloneResponse(
@@ -758,7 +837,7 @@ async def save_voice(
     request: Request,
     name: str = Form(..., description="Name for the voice"),
     ref_audio: UploadFile = File(..., description="Reference audio file (3-60 seconds)"),
-    ref_text: str = Form(..., description="Transcription of the reference audio"),
+    ref_text: str = Form(..., description="Exact transcription of the reference audio"),
     language: str = Form(default="Spanish", description="Voice language"),
 ):
     """
@@ -789,10 +868,6 @@ async def save_voice(
             status_code=400,
             detail=f"Unsupported language. Supported: {', '.join(config.VOICE_CLONE_LANGUAGES)}"
         )
-
-    # Validate ref_text
-    if not ref_text or len(ref_text.strip()) == 0:
-        raise HTTPException(status_code=400, detail="Reference text cannot be empty")
 
     try:
         # Read and validate audio
@@ -826,9 +901,19 @@ async def save_voice(
                 detail=f"Reference audio too long (max {config.VOICE_CLONE_MAX_REF_DURATION}s)"
             )
 
-        # Save voice
+        # Compute voice prompt on Modal GPU
         import modal
+        logger.info("[save-voice] computing voice prompt on GPU")
+        TTSModel = modal.Cls.from_name(config.MODAL_APP_NAME, "Qwen3TTSVoiceCloner")
+        tts_model = TTSModel()
+        prompt_bytes = await tts_model.compute_voice_prompt.remote.aio(
+            preprocessed_ref,
+            ref_text.strip(),
+            language,
+        )
+        logger.info("[save-voice] voice prompt computed, storing voice metadata")
 
+        # Save voice with prompt (no audio stored)
         VoiceStorage = modal.Cls.from_name(config.MODAL_APP_NAME, "VoiceStorage")
         storage = VoiceStorage()
 
@@ -836,9 +921,9 @@ async def save_voice(
         result = await storage.save_voice.remote.aio(
             voice_id=voice_id,
             name=name.strip(),
-            ref_audio_bytes=preprocessed_ref,
             ref_text=ref_text.strip(),
             language=language,
+            prompt_bytes=prompt_bytes,
         )
 
         if not result.get("success"):
@@ -924,41 +1009,176 @@ async def synthesize_with_voice(
         import modal
         request_trace = uuid.uuid4().hex[:8]
         t_request_start = time.perf_counter()
-        print(f"[synthesize:{request_trace}] request started")
+        print(f"[synthesize:{request_trace}] request started", flush=True)
+        logger.info("[synthesize:%s] request started", request_trace)
 
-        # Get saved voice
+        # Get saved voice (metadata + audio + cached voice prompt if available)
         t_storage_start = time.perf_counter()
+        logger.info("[synthesize:%s] loading saved voice metadata and prompt", request_trace)
         VoiceStorage = modal.Cls.from_name(config.MODAL_APP_NAME, "VoiceStorage")
         storage = VoiceStorage()
-        voice_data = await storage.get_voice.remote.aio(voice_id)
+        voice_data = await storage.get_voice_with_prompt.remote.aio(voice_id)
         t_storage = time.perf_counter() - t_storage_start
 
         if not voice_data.get("success"):
             raise HTTPException(status_code=404, detail=voice_data.get("error", "Voice not found"))
 
         metadata = voice_data["metadata"]
-        ref_audio_bytes = voice_data["audio_bytes"]
+        prompt_bytes = voice_data.get("prompt_bytes")
+        ref_audio_bytes = voice_data.get("audio_bytes")
+
+        logger.info(
+            "[synthesize:%s] loaded voice: name=%s language=%s",
+            request_trace,
+            metadata.get("name"),
+            metadata["language"],
+        )
+
+        # Legacy fallback: for voices saved before prompt caching, compute once
+        # from stored ref audio, then persist prompt.pt for subsequent calls.
+        if prompt_bytes is None:
+            if not ref_audio_bytes:
+                raise HTTPException(status_code=404, detail="Voice prompt not found")
+
+            logger.info("[synthesize:%s] legacy voice detected; computing prompt from ref audio", request_trace)
+            TTSModel = modal.Cls.from_name(config.MODAL_APP_NAME, "Qwen3TTSVoiceCloner")
+            prompt_model = TTSModel()
+            prompt_bytes = await prompt_model.compute_voice_prompt.remote.aio(
+                ref_audio_bytes,
+                metadata.get("ref_text", ""),
+                metadata["language"],
+            )
+            save_prompt_result = await storage.save_voice_prompt.remote.aio(voice_id, prompt_bytes)
+            if not save_prompt_result.get("success"):
+                logger.warning(
+                    "[synthesize:%s] failed to persist migrated prompt for voice_id=%s: %s",
+                    request_trace,
+                    voice_id,
+                    save_prompt_result.get("error", "unknown"),
+                )
+            else:
+                logger.info("[synthesize:%s] migrated legacy voice prompt for voice_id=%s", request_trace, voice_id)
 
         # Generate audio with TTS
         t_modal_lookup_start = time.perf_counter()
+        logger.info("[synthesize:%s] resolving Modal class %s", request_trace, "Qwen3TTSVoiceCloner")
         TTSModel = modal.Cls.from_name(config.MODAL_APP_NAME, "Qwen3TTSVoiceCloner")
         model = TTSModel()
         t_modal_lookup = time.perf_counter() - t_modal_lookup_start
 
         t_remote_start = time.perf_counter()
-        result = await model.generate_voice_clone.remote.aio(
-            ref_audio_bytes,
-            metadata["ref_text"],
-            target_text.strip(),
-            metadata["language"],
+        print(
+            f"[synthesize:{request_trace}] invoking Modal TTS chars={len(target_text.strip())} "
+            f"language={metadata['language']} voice_id={voice_id}",
+            flush=True,
         )
+        logger.info(
+            "[synthesize:%s] invoking Modal TTS (chars=%s, language=%s, voice_id=%s)",
+            request_trace,
+            len(target_text.strip()),
+            metadata["language"],
+            voice_id,
+        )
+        import json
+
+        result = None
+        stream_had_progress = False
+        stream_error_message = None
+        try:
+            async for synth_event in model.generate_voice_clone_stream.remote_gen.aio(
+                None,  # ref_audio_bytes not needed; using cached prompt
+                metadata.get("ref_text", ""),
+                target_text.strip(),
+                metadata["language"],
+                request_trace,
+                prompt_bytes,  # use cached prompt directly
+            ):
+                # Modal generators may surface payloads as dicts, JSON strings, or bytes.
+                if isinstance(synth_event, (bytes, bytearray)):
+                    synth_event = synth_event.decode("utf-8", errors="replace")
+                if isinstance(synth_event, str):
+                    try:
+                        synth_event = json.loads(synth_event)
+                    except json.JSONDecodeError:
+                        # Treat non-JSON status lines as progress messages.
+                        synth_event = {"type": "status", "message": synth_event}
+                if not isinstance(synth_event, dict):
+                    print(
+                        f"[synthesize:{request_trace}] unexpected stream event type="
+                        f"{type(synth_event)} value={synth_event!r}",
+                        flush=True,
+                    )
+                    continue
+
+                event_type = synth_event.get("type")
+                if event_type == "status":
+                    message = synth_event.get("message", "")
+                    if message:
+                        stream_had_progress = True
+                        print(message, flush=True)
+                        logger.info("[synthesize:%s] %s", request_trace, message)
+                elif event_type == "error":
+                    error_msg = synth_event.get("error", "Unknown synthesis error")
+                    stream_error_message = error_msg
+                    logger.warning(
+                        "[synthesize:%s] stream emitted error event: %s",
+                        request_trace,
+                        error_msg,
+                    )
+                    # Break and fall back to non-stream path below.
+                    break
+                elif event_type == "complete":
+                    result = synth_event.get("result")
+        except HTTPException:
+            raise
+        except Exception as stream_error:
+            # Backward compatibility: if Modal deploy is older and doesn't yet have
+            # generate_voice_clone_stream, fall back to non-stream invocation.
+            print(
+                f"[synthesize:{request_trace}] stream path failed ({stream_error}); "
+                "falling back to non-stream call",
+                flush=True,
+            )
+            logger.warning(
+                "[synthesize:%s] stream path failed, falling back to non-stream: %s",
+                request_trace,
+                stream_error,
+            )
+        # If stream did not complete successfully, fall back to non-stream.
+        if result is None:
+            if stream_error_message:
+                print(
+                    f"[synthesize:{request_trace}] stream returned error event: {stream_error_message}; "
+                    "falling back to non-stream call",
+                    flush=True,
+                )
+            elif stream_had_progress:
+                print(
+                    f"[synthesize:{request_trace}] stream ended without complete event; "
+                    "falling back to non-stream call",
+                    flush=True,
+                )
+            result = await model.generate_voice_clone.remote.aio(
+                None,
+                metadata.get("ref_text", ""),
+                target_text.strip(),
+                metadata["language"],
+                request_trace,
+                prompt_bytes,
+            )
+
         t_remote = time.perf_counter() - t_remote_start
+
+        if result is None:
+            raise HTTPException(status_code=500, detail="Synthesis failed: no result returned")
 
         if not result.get("success"):
             raise HTTPException(
                 status_code=500,
                 detail=f"Synthesis failed: {result.get('error', 'Unknown error')}"
             )
+
+        _log_tts_telemetry(request_trace, result.get("tts_telemetry"))
 
         # Cache generated audio
         t_cache_start = time.perf_counter()
@@ -974,10 +1194,15 @@ async def synthesize_with_voice(
         t_cache = time.perf_counter() - t_cache_start
 
         t_total = time.perf_counter() - t_request_start
-        print(
-            f"[synthesize:{request_trace}] timing storage={t_storage:.3f}s "
-            f"modal_lookup={t_modal_lookup:.3f}s remote_tts={t_remote:.3f}s "
-            f"cache={t_cache:.3f}s total={t_total:.3f}s"
+        logger.info(
+            "[synthesize:%s] timing storage=%.3fs modal_lookup=%.3fs remote_tts=%.3fs "
+            "cache=%.3fs total=%.3fs",
+            request_trace,
+            t_storage,
+            t_modal_lookup,
+            t_remote,
+            t_cache,
+            t_total,
         )
 
         return SynthesizeResponse(
@@ -989,6 +1214,7 @@ async def synthesize_with_voice(
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("[synthesize] unexpected server error")
         raise HTTPException(status_code=500, detail="An unexpected error occurred.")
 
 
