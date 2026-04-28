@@ -60,6 +60,9 @@ const translations = {
         'voice.processing_detail_chunk': 'Chunk {current}/{total}',
         'voice.processing_detail_batch': 'Batch {current}/{total}',
         'voice.processing_detail_batch_chunk': 'Batch {batchCurrent}/{batchTotal} · Chunk {chunkCurrent}/{chunkTotal}',
+        'voice.processing_announce_preparing': 'Preparing synthesis',
+        'voice.processing_announce_batch': 'Processing batch {current} of {total}',
+        'voice.processing_announce_complete': 'Synthesis complete',
         'voice.result_title': 'Generated Voice',
         'voice.download_wav': 'Download WAV',
         'voice.new_clone': 'New Clone',
@@ -199,6 +202,9 @@ const translations = {
         'voice.processing_detail_chunk': 'Chunk {current}/{total}',
         'voice.processing_detail_batch': 'Lote {current}/{total}',
         'voice.processing_detail_batch_chunk': 'Lote {batchCurrent}/{batchTotal} · Chunk {chunkCurrent}/{chunkTotal}',
+        'voice.processing_announce_preparing': 'Preparando sintesis',
+        'voice.processing_announce_batch': 'Procesando lote {current} de {total}',
+        'voice.processing_announce_complete': 'Sintesis completada',
         'voice.result_title': 'Voz Generada',
         'voice.download_wav': 'Descargar WAV',
         'voice.new_clone': 'Nueva Clonaci\u00f3n',
@@ -359,6 +365,7 @@ const voiceCloneSection = document.getElementById('voiceCloneSection');
 const voiceCloneProcessing = document.getElementById('voiceCloneProcessing');
 const voiceCloneResults = document.getElementById('voiceCloneResults');
 const voiceProcessingDetail = document.getElementById('voiceProcessingDetail');
+const voiceProcessingAnnounce = document.getElementById('voiceProcessingAnnounce');
 const refUploadTab = document.getElementById('refUploadTab');
 const refRecordTab = document.getElementById('refRecordTab');
 const refUploadContent = document.getElementById('refUploadContent');
@@ -1568,6 +1575,25 @@ function setVoiceProcessingDetail(detail) {
     }
 }
 
+function setVoiceProcessingAnnounce(detail) {
+    if (voiceProcessingAnnounce) {
+        voiceProcessingAnnounce.textContent = detail || '';
+    }
+}
+
+function formatSynthProgressAnnouncement(data, announceState) {
+    if (data.kind === 'batch_start' && Number.isInteger(data.batch_index) && Number.isInteger(data.batch_total)) {
+        if (announceState.lastBatchAnnounced !== data.batch_index) {
+            announceState.lastBatchAnnounced = data.batch_index;
+            return interpolateTranslation('voice.processing_announce_batch', {
+                current: data.batch_index,
+                total: data.batch_total,
+            });
+        }
+    }
+    return '';
+}
+
 function formatSynthProgressDetail(data, state) {
     if (data.kind === 'chunk_plan' && Number.isInteger(data.batch_total)) {
         state.batchTotal = data.batch_total;
@@ -1635,6 +1661,7 @@ async function synthesizeWithSavedVoice() {
     voiceCloneSection.classList.add('hidden');
     voiceCloneProcessing.classList.remove('hidden');
     setVoiceProcessingDetail(t('voice.processing_detail_preparing'));
+    setVoiceProcessingAnnounce(t('voice.processing_announce_preparing'));
 
     try {
         const formData = new FormData();
@@ -1676,6 +1703,9 @@ async function synthesizeWithSavedVoice() {
             chunkCurrent: null,
             chunkTotal: null,
         };
+        const announceState = {
+            lastBatchAnnounced: null,
+        };
 
         while (true) {
             const { done, value } = await reader.read();
@@ -1713,6 +1743,10 @@ async function synthesizeWithSavedVoice() {
                 const data = JSON.parse(eventData);
                 if (eventType === 'progress') {
                     setVoiceProcessingDetail(formatSynthProgressDetail(data, progressState));
+                    const announcement = formatSynthProgressAnnouncement(data, announceState);
+                    if (announcement) {
+                        setVoiceProcessingAnnounce(announcement);
+                    }
                 } else if (eventType === 'error') {
                     throw new Error(data.error || t('toast.synth_error'));
                 } else if (eventType === 'complete') {
@@ -1731,6 +1765,7 @@ async function synthesizeWithSavedVoice() {
         generatedDuration.textContent = formatDuration(completion.duration || 0);
 
         setVoiceProcessingDetail('');
+        setVoiceProcessingAnnounce(t('voice.processing_announce_complete'));
         voiceCloneProcessing.classList.add('hidden');
         voiceCloneResults.classList.remove('hidden');
 
@@ -1740,6 +1775,7 @@ async function synthesizeWithSavedVoice() {
         console.error('Synthesize error:', error);
         showToast(error.message, 'error');
         setVoiceProcessingDetail('');
+        setVoiceProcessingAnnounce('');
         voiceCloneProcessing.classList.add('hidden');
         voiceCloneSection.classList.remove('hidden');
     }

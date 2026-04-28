@@ -2,7 +2,10 @@
 
 import re
 import sys
+import os
 import logging
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Optional
 import asyncio
@@ -277,6 +280,26 @@ app.add_middleware(
 static_path = Path(__file__).parent.parent / "static"
 if static_path.exists():
     app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
+
+# App-owned temp directory for safe cleanup on shutdown.
+TRANSCODIO_TEMP_DIR = tempfile.mkdtemp(prefix="transcodio-api-")
+os.environ["TRANSCODIO_TEMP_DIR"] = TRANSCODIO_TEMP_DIR
+
+
+@app.on_event("startup")
+async def app_startup() -> None:
+    logger.info("transcodio temp directory initialized: %s", TRANSCODIO_TEMP_DIR)
+
+
+@app.on_event("shutdown")
+async def app_shutdown() -> None:
+    """Clean only temp files created by this app instance."""
+    try:
+        if os.path.isdir(TRANSCODIO_TEMP_DIR):
+            shutil.rmtree(TRANSCODIO_TEMP_DIR, ignore_errors=True)
+            logger.info("transcodio temp directory removed: %s", TRANSCODIO_TEMP_DIR)
+    except Exception:
+        logger.exception("failed cleaning transcodio temp directory: %s", TRANSCODIO_TEMP_DIR)
 
 
 @app.get("/", response_class=HTMLResponse)

@@ -67,6 +67,12 @@ TTS_CHUNK_MAX_WORDS = 80          # max words per chunk (pysbd-based splitting)
 TTS_SHORT_SENTENCE_WORDS = 3      # sentences <= this get merged with a neighbor
 TTS_ENABLE_BATCHING = True
 TTS_BATCH_SIZE = 8
+TTS_CHUNK_MAX_RETRIES = 3                # retries per chunk after first attempt
+TTS_SLOW_CHUNK_MULTIPLIER = 2.5          # retry when chunk runtime exceeds avg * multiplier
+TTS_SLOW_BATCH_MULTIPLIER = 2.5          # fallback batch->single when batch runtime exceeds expected
+TTS_MIN_BASELINE_CHUNKS = 3              # chunk samples before avg-based slow detection
+TTS_SLOW_CHUNK_ABSOLUTE_S = 45.0         # absolute slow threshold before avg baseline is stable
+TTS_SLOW_BATCH_ABSOLUTE_S = 120.0        # absolute slow threshold for whole batch
 # Gap inserted between stitched chunks based on the boundary type
 TTS_GAP_PARAGRAPH_MS = 400        # blank line / paragraph break
 TTS_GAP_SENTENCE_MS = 180         # sentence-end punctuation (. ! ?)
@@ -287,7 +293,6 @@ class ParakeetSTTModel:
         self.model = nemo_asr.models.ASRModel.from_pretrained(
             model_name=STT_MODEL_ID
         )
-
         load_time = time.time() - start_time
         print(f"Model loaded successfully in {load_time:.2f}s")
 
@@ -987,6 +992,7 @@ class Qwen3TTSVoiceCloner:
         import time
         import os
         import inspect
+        import warnings
 
         model_config = TTS_MODELS["qwen"]
         start_time = time.time()
@@ -1019,8 +1025,8 @@ class Qwen3TTSVoiceCloner:
         from qwen_tts import Qwen3TTSModel
 
         # Qwen3-TTS forwards kwargs through to AutoModel.from_pretrained(...).
-        # Prefer dtype first for flash-attn to avoid torch_dtype deprecation and
-        # FA2 "dtype not specified" warnings seen in container logs.
+        # On this pinned commit + transformers combination, FA2 can still emit
+        # "dtype not specified" unless torch_dtype is passed explicitly.
         model_kwargs_dtype = {
             "device_map": "cuda:0",
             "dtype": torch.bfloat16,
@@ -1037,20 +1043,26 @@ class Qwen3TTSVoiceCloner:
             import flash_attn  # noqa: F401
             print("flash-attn detected; trying attn_implementation=flash_attention_2")
             try:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=r"`torch_dtype` is deprecated! Use `dtype` instead!",
+                        category=UserWarning,
+                    )
+                    self.model = Qwen3TTSModel.from_pretrained(
+                        model_config["model_id"],
+                        attn_implementation="flash_attention_2",
+                        **model_kwargs_torch_dtype,
+                    )
+                print("flash-attn enabled with torch_dtype=bfloat16 (compat path)")
+            except Exception as flash_td_error:
+                print(f"flash-attn + torch_dtype path failed ({flash_td_error}); retrying with dtype")
                 self.model = Qwen3TTSModel.from_pretrained(
                     model_config["model_id"],
                     attn_implementation="flash_attention_2",
                     **model_kwargs_dtype,
                 )
                 print("flash-attn enabled with dtype=bfloat16")
-            except Exception as flash_td_error:
-                print(f"flash-attn + dtype path failed ({flash_td_error}); retrying with torch_dtype")
-                self.model = Qwen3TTSModel.from_pretrained(
-                    model_config["model_id"],
-                    attn_implementation="flash_attention_2",
-                    **model_kwargs_torch_dtype,
-                )
-                print("flash-attn enabled with torch_dtype=bfloat16")
         except ImportError:
             print("flash-attn not installed; loading Qwen3-TTS without flash attention")
             try:
@@ -1237,6 +1249,9 @@ class Qwen3TTSVoiceCloner:
         worker = threading.Thread(target=_worker, daemon=True)
         worker.start()
 
+        last_heartbeat = time.monotonic()
+        heartbeat_seconds = 8.0
+
         while worker.is_alive() or not log_queue.empty():
             try:
                 line = log_queue.get(timeout=0.25)
@@ -1245,7 +1260,16 @@ class Qwen3TTSVoiceCloner:
                     "stage": "progress",
                     "message": line,
                 }
+                last_heartbeat = time.monotonic()
             except queue.Empty:
+                now = time.monotonic()
+                if worker.is_alive() and (now - last_heartbeat) >= heartbeat_seconds:
+                    yield {
+                        "type": "status",
+                        "stage": "heartbeat",
+                        "message": f"[tts:{request_trace or 'modal'}] still processing",
+                    }
+                    last_heartbeat = now
                 continue
 
         if "error" in error_holder:
@@ -2071,6 +2095,28 @@ class Qwen3TTSVoiceCloner:
             except Exception:
                 return wav
 
+        chunk_duration_samples: list[float] = []
+
+        def _average_chunk_seconds() -> Optional[float]:
+            if not chunk_duration_samples:
+                return None
+            if len(chunk_duration_samples) < TTS_MIN_BASELINE_CHUNKS:
+                return None
+            return float(sum(chunk_duration_samples) / len(chunk_duration_samples))
+
+        def _is_slow_chunk(elapsed_s: float, avg_chunk_s: Optional[float]) -> bool:
+            if avg_chunk_s is None:
+                return elapsed_s >= TTS_SLOW_CHUNK_ABSOLUTE_S
+            return elapsed_s >= max(TTS_SLOW_CHUNK_ABSOLUTE_S, avg_chunk_s * TTS_SLOW_CHUNK_MULTIPLIER)
+
+        def _is_slow_batch(elapsed_s: float, avg_chunk_s: Optional[float], chunk_count: int) -> bool:
+            if chunk_count <= 0:
+                return False
+            if avg_chunk_s is None:
+                return elapsed_s >= TTS_SLOW_BATCH_ABSOLUTE_S
+            expected_s = avg_chunk_s * chunk_count
+            return elapsed_s >= max(TTS_SLOW_BATCH_ABSOLUTE_S, expected_s * TTS_SLOW_BATCH_MULTIPLIER)
+
         ref_audio_path = None
         try:
             start_time = time.time()
@@ -2207,11 +2253,23 @@ class Qwen3TTSVoiceCloner:
                                 "in_flight_chunks": len(batch_texts),
                                 "chunk_range": [batch_start_chunk, batch_end_chunk],
                             })
+                            t_batch_start = time.perf_counter()
                             batch_wavs_obj, batch_sr = self.model.generate_voice_clone(
                                 text=batch_texts,
                                 language=language,
                                 voice_clone_prompt=voice_prompt_items,
                             )
+                            t_batch_elapsed = time.perf_counter() - t_batch_start
+                            avg_chunk_s = _average_chunk_seconds()
+                            if _is_slow_batch(t_batch_elapsed, avg_chunk_s, len(batch_texts)):
+                                raise RuntimeError(
+                                    f"slow_batch_elapsed={t_batch_elapsed:.2f}s avg_chunk={avg_chunk_s} "
+                                    f"chunks={len(batch_texts)}"
+                                )
+
+                            per_chunk_elapsed = t_batch_elapsed / max(1, len(batch_texts))
+                            chunk_duration_samples.extend([per_chunk_elapsed] * len(batch_texts))
+
                             batch_wavs = _normalize_wavs(batch_wavs_obj)
                             if len(batch_wavs) != len(batch_texts):
                                 raise ValueError(
@@ -2265,13 +2323,73 @@ class Qwen3TTSVoiceCloner:
 
                     # Safe fallback: synthesize each chunk independently.
                     for rel_idx, chunk_text in enumerate(batch_texts):
-                        chunk_wavs_obj, chunk_sr = self.model.generate_voice_clone(
-                            text=chunk_text,
-                            language=language,
-                            voice_clone_prompt=voice_prompt_items,
-                        )
-                        chunk_wavs = _normalize_wavs(chunk_wavs_obj)
-                        all_wavs.append(chunk_wavs[0])
+                        chunk_index = i + rel_idx + 1
+                        max_attempts = 1 + TTS_CHUNK_MAX_RETRIES
+                        chunk_result = None
+                        chunk_sr = None
+                        last_chunk_error = None
+
+                        for attempt in range(1, max_attempts + 1):
+                            avg_chunk_s = _average_chunk_seconds()
+                            t_chunk_start = time.perf_counter()
+                            try:
+                                chunk_wavs_obj, chunk_sr = self.model.generate_voice_clone(
+                                    text=chunk_text,
+                                    language=language,
+                                    voice_clone_prompt=voice_prompt_items,
+                                )
+                                t_chunk_elapsed = time.perf_counter() - t_chunk_start
+                                chunk_wavs = _normalize_wavs(chunk_wavs_obj)
+
+                                if not chunk_wavs:
+                                    raise RuntimeError("Empty wav result for chunk")
+
+                                if _is_slow_chunk(t_chunk_elapsed, avg_chunk_s) and attempt < max_attempts:
+                                    _status(
+                                        f"chunk-retry index={chunk_index} attempt={attempt}/{max_attempts} "
+                                        f"reason=slow elapsed={t_chunk_elapsed:.2f}s avg={avg_chunk_s}"
+                                    )
+                                    telemetry_events.append({
+                                        "type": "chunk_retry",
+                                        "chunk_index": chunk_index,
+                                        "batch_index": batch_index,
+                                        "attempt": attempt,
+                                        "max_attempts": max_attempts,
+                                        "reason": "slow",
+                                        "elapsed_s": t_chunk_elapsed,
+                                        "avg_chunk_s": avg_chunk_s,
+                                    })
+                                    continue
+
+                                chunk_result = chunk_wavs[0]
+                                chunk_duration_samples.append(t_chunk_elapsed)
+                                break
+                            except Exception as chunk_error:
+                                last_chunk_error = chunk_error
+                                _status(
+                                    f"chunk-retry index={chunk_index} attempt={attempt}/{max_attempts} "
+                                    f"reason=error error={chunk_error}"
+                                )
+                                telemetry_events.append({
+                                    "type": "chunk_retry",
+                                    "chunk_index": chunk_index,
+                                    "batch_index": batch_index,
+                                    "attempt": attempt,
+                                    "max_attempts": max_attempts,
+                                    "reason": "error",
+                                    "error": str(chunk_error),
+                                })
+                                if attempt >= max_attempts:
+                                    raise RuntimeError(
+                                        f"Chunk {chunk_index} failed after {max_attempts} attempts"
+                                    ) from chunk_error
+
+                        if chunk_result is None:
+                            raise RuntimeError(
+                                f"Chunk {chunk_index} did not produce audio after retries"
+                            ) from last_chunk_error
+
+                        all_wavs.append(chunk_result)
                         sr = sr or chunk_sr
                         completed_chunks += 1
                         fallback_chunks += 1
@@ -2282,7 +2400,7 @@ class Qwen3TTSVoiceCloner:
                         )
                         telemetry_events.append({
                             "type": "chunk_complete",
-                            "chunk_index": i + rel_idx + 1,
+                            "chunk_index": chunk_index,
                             "chunks_completed": completed_chunks,
                             "chunks_total": total_chunks,
                             "batch_index": batch_index,

@@ -1,6 +1,8 @@
 """Audio file validation and preprocessing utilities."""
 
 import mimetypes
+import os
+import tempfile
 from pathlib import Path
 from typing import Tuple, Optional
 import io
@@ -11,6 +13,23 @@ import config
 class AudioValidationError(Exception):
     """Custom exception for audio validation errors."""
     pass
+
+
+def _app_temp_dir() -> Optional[str]:
+    """Return app-owned temp directory if configured by API server."""
+    temp_dir = os.getenv("TRANSCODIO_TEMP_DIR", "").strip()
+    if not temp_dir:
+        return None
+    Path(temp_dir).mkdir(parents=True, exist_ok=True)
+    return temp_dir
+
+
+def _named_tempfile(suffix: str):
+    """Create a temporary file inside app temp dir when available."""
+    app_dir = _app_temp_dir()
+    if app_dir:
+        return tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=app_dir)
+    return tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
 
 
 def validate_file_size(file_size: int) -> None:
@@ -75,11 +94,8 @@ def get_audio_duration(audio_bytes: bytes) -> float:
         AudioValidationError: If unable to read audio file
     """
     import ffmpeg
-    import tempfile
-    import os
-
     # Write to temporary file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".audio") as tmp_file:
+    with _named_tempfile(suffix=".audio") as tmp_file:
         tmp_file.write(audio_bytes)
         tmp_path = tmp_file.name
 
@@ -117,7 +133,7 @@ def get_audio_duration(audio_bytes: bytes) -> float:
         # Fallback: convert to WAV and get duration from that
         # This handles webm files from browser recording that lack duration metadata
         # or have malformed headers that cause ffprobe to fail
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as wav_file:
+        with _named_tempfile(suffix=".wav") as wav_file:
             wav_path = wav_file.name
 
         (
@@ -194,18 +210,16 @@ def preprocess_audio(audio_bytes: bytes, sample_rate: Optional[int] = None) -> b
     """
     try:
         import ffmpeg
-        import tempfile
-        import os
 
         target_rate = sample_rate if sample_rate else config.SAMPLE_RATE
 
         # Write input to temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".audio") as tmp_file:
+        with _named_tempfile(suffix=".audio") as tmp_file:
             tmp_file.write(audio_bytes)
             input_path = tmp_file.name
 
         # Create output temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+        with _named_tempfile(suffix=".wav") as tmp_file:
             output_path = tmp_file.name
 
         try:
