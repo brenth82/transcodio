@@ -19,7 +19,7 @@ MODAL_APP_NAME = "transcodio-app"
 MODAL_VOLUME_NAME = "parakeet-models"
 MODAL_GPU_TYPE = "L4"
 MODAL_CONTAINER_IDLE_TIMEOUT = 20
-MODAL_TIMEOUT = 9000
+MODAL_TIMEOUT = 3600
 MODAL_MEMORY_MB = 8192
 
 # Cold start optimization flags
@@ -61,13 +61,15 @@ TTS_MODELS = {
     },
 }
 TTS_CONTAINER_IDLE_TIMEOUT = 20
-TTS_TIMEOUT = 900
+TTS_TIMEOUT = 1800
 TTS_ENABLE_CHUNKING = True
 TTS_CHUNK_MAX_WORDS = 80          # max words per chunk (pysbd-based splitting)
 TTS_SHORT_SENTENCE_WORDS = 3      # sentences <= this get merged with a neighbor
 TTS_ENABLE_BATCHING = True
-TTS_BATCH_SIZE = 8
+TTS_BATCH_SIZE = 6
 TTS_CHUNK_MAX_RETRIES = 3                # retries per chunk after first attempt
+TTS_RELOAD_AFTER_MAX_RETRIES = True      # reload model once when a chunk exhausts retries
+TTS_MAX_MODEL_RELOADS_PER_REQUEST = 1    # cap reloads to avoid endless reload loops
 TTS_SLOW_CHUNK_MULTIPLIER = 2.5          # retry when chunk runtime exceeds avg * multiplier
 TTS_SLOW_BATCH_MULTIPLIER = 2.5          # fallback batch->single when batch runtime exceeds expected
 TTS_MIN_BASELINE_CHUNKS = 3              # chunk samples before avg-based slow detection
@@ -2222,6 +2224,7 @@ class Qwen3TTSVoiceCloner:
                 completed_chunks = 0
                 effective_max_concurrency = 1
                 fallback_chunks = 0
+                model_reload_count = 0
                 for i in range(0, total_chunks, batch_size):
                     batch_texts = chunks[i:i + batch_size]
                     batch_index = (i // batch_size) + 1
@@ -2329,7 +2332,9 @@ class Qwen3TTSVoiceCloner:
                         chunk_sr = None
                         last_chunk_error = None
 
-                        for attempt in range(1, max_attempts + 1):
+                        chunk_reloaded = False
+                        attempt = 1
+                        while attempt <= max_attempts:
                             avg_chunk_s = _average_chunk_seconds()
                             t_chunk_start = time.perf_counter()
                             try:
@@ -2380,9 +2385,44 @@ class Qwen3TTSVoiceCloner:
                                     "error": str(chunk_error),
                                 })
                                 if attempt >= max_attempts:
+                                    if (
+                                        TTS_RELOAD_AFTER_MAX_RETRIES
+                                        and not chunk_reloaded
+                                        and model_reload_count < TTS_MAX_MODEL_RELOADS_PER_REQUEST
+                                    ):
+                                        _status(
+                                            f"model-reload trigger chunk={chunk_index} "
+                                            f"after {max_attempts} attempts"
+                                        )
+                                        telemetry_events.append({
+                                            "type": "model_reload",
+                                            "chunk_index": chunk_index,
+                                            "batch_index": batch_index,
+                                            "attempts_exhausted": max_attempts,
+                                            "reload_count_before": model_reload_count,
+                                        })
+                                        try:
+                                            self.load_model()
+                                            model_reload_count += 1
+                                            chunk_reloaded = True
+                                            attempt = 1
+                                            continue
+                                        except Exception as reload_error:
+                                            _status(f"model-reload failed chunk={chunk_index} error={reload_error}")
+                                            telemetry_events.append({
+                                                "type": "model_reload_failed",
+                                                "chunk_index": chunk_index,
+                                                "batch_index": batch_index,
+                                                "error": str(reload_error),
+                                            })
                                     raise RuntimeError(
                                         f"Chunk {chunk_index} failed after {max_attempts} attempts"
                                     ) from chunk_error
+
+                                attempt += 1
+                                continue
+
+                            attempt += 1
 
                         if chunk_result is None:
                             raise RuntimeError(
