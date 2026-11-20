@@ -62,7 +62,7 @@ ENABLE_GPU_MEMORY_SNAPSHOT = True
 # Runs a dummy transcription during initialization to compile CUDA kernels
 # Works best WITH GPU snapshots to capture compiled kernels
 # Expected improvement: Minimal without snapshots, significant with GPU snapshots
-ENABLE_MODEL_WARMUP = True
+ENABLE_MODEL_WARMUP = False  # Kept in sync with modal_app/app.py (warm-up pass disabled there)
 
 # Optimization 4: Extended Container Idle Timeout
 # Keep containers warm longer to avoid cold starts
@@ -114,7 +114,7 @@ TTS_ENABLE_CHUNKING = True
 TTS_CHUNK_MAX_WORDS = 80          # max words per chunk (pysbd-based splitting)
 TTS_SHORT_SENTENCE_WORDS = 3      # sentences <= this get merged with a neighbor
 TTS_ENABLE_BATCHING = True
-TTS_BATCH_SIZE = 8
+TTS_BATCH_SIZE = 6  # Kept in sync with modal_app/app.py
 # Gap inserted between stitched chunks based on the boundary type
 TTS_GAP_PARAGRAPH_MS = 400        # blank line / paragraph break
 TTS_GAP_SENTENCE_MS = 180         # sentence-end punctuation (. ! ?)
