@@ -9,9 +9,9 @@ STATIC_DIR = BASE_DIR / "static"
 TEMP_DIR = BASE_DIR / "temp"
 
 # Audio file limits
-MAX_FILE_SIZE_MB = 100
+MAX_FILE_SIZE_MB = 300  # 3 hours of audio at up to ~220 kbps
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
-MAX_DURATION_SECONDS = 3600  # 60 minutes
+MAX_DURATION_SECONDS = 10800  # 3 hours
 
 # Supported audio formats
 SUPPORTED_FORMATS = ["mp3", "wav", "m4a", "flac", "ogg", "webm", "mp4"]
