@@ -8,6 +8,8 @@ const translations = {
         'mode.transcribe': 'Transcribe',
         'mode.voice_clone': 'Clone Voice',
         'mode.image_gen': 'Generate Image',
+        'home.title': 'Choose what you want to do',
+        'home.back': 'Back to Home',
 
         // Upload section
         'upload.title': 'Drag your audio file here',
@@ -150,6 +152,8 @@ const translations = {
         'mode.transcribe': 'Transcribir',
         'mode.voice_clone': 'Clonar Voz',
         'mode.image_gen': 'Generar Imagen',
+        'home.title': 'Elige lo que quieres hacer',
+        'home.back': 'Volver al Inicio',
 
         // Upload section
         'upload.title': 'Arrastra tu archivo de audio aqu\u00ed',
@@ -356,6 +360,8 @@ const tabBtns = document.querySelectorAll('.tab-btn');
 const transcriptionTab = document.getElementById('transcriptionTab');
 
 // Mode selector elements
+const homeSection = document.getElementById('homeSection');
+const homeBackBtn = document.getElementById('homeBackBtn');
 const transcriptionModeBtn = document.getElementById('transcriptionModeBtn');
 const voiceCloneModeBtn = document.getElementById('voiceCloneModeBtn');
 const imageGenModeBtn = document.getElementById('imageGenModeBtn');
@@ -427,7 +433,7 @@ let currentFile = null;
 let currentSegments = []; // Store segments for subtitle export
 
 // Voice clone state
-let currentMode = 'transcription';
+let currentMode = 'home';
 let refAudioFile = null;
 let refAudioBlob = null;
 let mediaRecorder = null;
@@ -445,6 +451,7 @@ let selectedVoiceId = null;
 function init() {
     setupEventListeners();
     applyTranslations();
+    switchMode('home');
     // Don't load voices on init - will load when user switches to voice clone mode
 }
 
@@ -487,6 +494,7 @@ function setupEventListeners() {
     transcriptionModeBtn.addEventListener('click', () => switchMode('transcription'));
     voiceCloneModeBtn.addEventListener('click', () => switchMode('voice-clone'));
     imageGenModeBtn.addEventListener('click', () => switchMode('image-gen'));
+    homeBackBtn.addEventListener('click', () => switchMode('home'));
 
     // Voice clone - Reference audio tabs
     refUploadTab.addEventListener('click', () => switchRefAudioTab('upload'));
@@ -614,9 +622,7 @@ async function processFile(file) {
 }
 
 function validateFile(file) {
-    // Check file type
-    const validTypes = ['audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/wave', 'audio/mp4', 'audio/x-m4a', 'audio/flac', 'audio/ogg', 'audio/webm', 'video/mp4'];
-    if (!validTypes.includes(file.type) && !file.name.match(/\.(mp3|wav|m4a|flac|ogg|webm|mp4)$/i)) {
+    if (!isSupportedAudioFile(file)) {
         showToast(t('toast.invalid_audio'), 'error');
         return false;
     }
@@ -629,6 +635,21 @@ function validateFile(file) {
     }
 
     return true;
+}
+
+function isSupportedAudioFile(file) {
+    const contentType = (file.type || '').toLowerCase();
+    if (contentType.startsWith('audio/')) {
+        return true;
+    }
+
+    // Some browsers report M4A as video/mp4.
+    if (contentType === 'video/mp4') {
+        return true;
+    }
+
+    const filename = file.name || '';
+    return /\.(mp3|wav|m4a|flac|ogg|webm|mp4|aac)$/i.test(filename);
 }
 
 // Transcription with Streaming
@@ -995,6 +1016,10 @@ function resetApp() {
 // Mode Switching
 function switchMode(mode) {
     currentMode = mode;
+    const inHome = mode === 'home';
+
+    homeSection.classList.toggle('hidden', !inHome);
+    homeBackBtn.classList.toggle('hidden', inHome);
 
     // Update mode buttons
     transcriptionModeBtn.classList.toggle('active', mode === 'transcription');
@@ -1050,8 +1075,8 @@ function handleRefFileDrop(event) {
 }
 
 function loadRefAudioFile(file) {
-    // Validate file type
-    if (!file.type.startsWith('audio/')) {
+    // Validate file type/extension (some browsers may omit or misreport MIME type)
+    if (!isSupportedAudioFile(file)) {
         showToast(t('toast.ref_audio_invalid'), 'error');
         return;
     }
