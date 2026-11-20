@@ -39,7 +39,7 @@ MODAL_VOLUME_NAME = "parakeet-models"  # Changed from kyutai-stt-models
 MODAL_GPU_TYPE = "L4"  # NVIDIA L4
 MODAL_GPU_COUNT = 1
 MODAL_CONTAINER_IDLE_TIMEOUT = 20  # 2 minutes
-MODAL_TIMEOUT = 9000  # 50 minutes max processing time (allows for 33min audio + diarization)
+MODAL_TIMEOUT = 3600  # Kept in sync with modal_app/app.py (3600 is the deployed value)
 MODAL_MEMORY_MB = 8192  # 8GB RAM
 
 # ============================================================================
@@ -109,7 +109,7 @@ DIARIZATION_SHIFT_LENGTH = 0.75  # Shift length in seconds (window overlap)
 # Voice Cloning Configuration
 ENABLE_VOICE_CLONING = True
 TTS_CONTAINER_IDLE_TIMEOUT = 20
-TTS_TIMEOUT = 900  # 15 minutes max per synthesis request
+TTS_TIMEOUT = 1800  # 30 minutes max per synthesis request (kept in sync with modal_app/app.py)
 TTS_ENABLE_CHUNKING = True
 TTS_CHUNK_MAX_WORDS = 80          # max words per chunk (pysbd-based splitting)
 TTS_SHORT_SENTENCE_WORDS = 3      # sentences <= this get merged with a neighbor
