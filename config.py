@@ -136,6 +136,10 @@ TTS_MODELS = {
     },
 }
 
+# Optional Hugging Face revision pin for reproducible Qwen weights.
+# Leave as None to follow the model's default branch/revision.
+QWEN_TTS_MODEL_REVISION = None
+
 # Default TTS model
 DEFAULT_TTS_MODEL = "qwen"
 

@@ -60,6 +60,9 @@ TTS_MODELS = {
         "description": "Fast, good quality (1.7B params)",
     },
 }
+# Optional Hugging Face revision pin for reproducible Qwen weights.
+# Leave as None to follow the model's default branch/revision.
+QWEN_TTS_MODEL_REVISION = None
 TTS_CONTAINER_IDLE_TIMEOUT = 20
 TTS_TIMEOUT = 1800
 TTS_ENABLE_CHUNKING = True
@@ -211,6 +214,23 @@ if ENABLE_GPU_MEMORY_SNAPSHOT:
         )
     decorator_kwargs["experimental_options"] = {"enable_gpu_snapshot": True}
     print(f"GPU Memory Snapshots: ENABLED (Experimental)")
+
+
+# Build Qwen TTS decorator arguments (snapshot flags applied here as well)
+qwen_decorator_kwargs = {
+    "image": qwen_tts_image,
+    "gpu": TTS_MODELS["qwen"]["gpu_type"],
+    "scaledown_window": 30,  # Aggressive: terminate 30s after last request (saves cost for personal use)
+    "timeout": TTS_TIMEOUT,
+    "memory": TTS_MODELS["qwen"]["memory_mb"],
+    "volumes": {"/models": volume},
+}
+
+if ENABLE_CPU_MEMORY_SNAPSHOT:
+    qwen_decorator_kwargs["enable_memory_snapshot"] = True
+
+if ENABLE_GPU_MEMORY_SNAPSHOT:
+    qwen_decorator_kwargs["experimental_options"] = {"enable_gpu_snapshot": True}
 
 
 class NoStdStreams:
@@ -866,8 +886,9 @@ class VoiceStorage:
             "ref_text": ref_text,
             "created_at": metadata["created_at"],
         })
+        print(f"Saving voice metadata index: {voice_id}")
         self._save_index(index)
-        volume.commit()
+        print(f"Voice metadata committed: {voice_id}")
 
         print(f"Voice saved: {name} ({voice_id})")
         return {"success": True, "voice_id": voice_id}
@@ -976,18 +997,11 @@ class VoiceStorage:
         return {"success": True}
 
 
-@app.cls(
-    image=qwen_tts_image,
-    gpu=TTS_MODELS["qwen"]["gpu_type"],
-    scaledown_window=30,  # Aggressive: terminate 30s after last request (saves cost for personal use)
-    timeout=TTS_TIMEOUT,
-    memory=TTS_MODELS["qwen"]["memory_mb"],
-    volumes={"/models": volume},
-)
+@app.cls(**qwen_decorator_kwargs)
 class Qwen3TTSVoiceCloner:
     """Qwen3-TTS model for voice cloning."""
 
-    @modal.enter()
+    @modal.enter(snap=ENABLE_CPU_MEMORY_SNAPSHOT or ENABLE_GPU_MEMORY_SNAPSHOT)
     def load_model(self):
         """Load Qwen3-TTS model once per container."""
         import torch
@@ -1037,6 +1051,10 @@ class Qwen3TTSVoiceCloner:
             "device_map": "cuda:0",
             "torch_dtype": torch.bfloat16,
         }
+        model_kwargs_revision = {}
+        if QWEN_TTS_MODEL_REVISION:
+            model_kwargs_revision["revision"] = QWEN_TTS_MODEL_REVISION
+            print(f"Using pinned Qwen model revision: {QWEN_TTS_MODEL_REVISION}")
 
         from_pretrained_sig = inspect.signature(Qwen3TTSModel.from_pretrained)
         print(f"Qwen3TTSModel.from_pretrained signature: {from_pretrained_sig}")
@@ -1054,6 +1072,7 @@ class Qwen3TTSVoiceCloner:
                     self.model = Qwen3TTSModel.from_pretrained(
                         model_config["model_id"],
                         attn_implementation="flash_attention_2",
+                        **model_kwargs_revision,
                         **model_kwargs_torch_dtype,
                     )
                 print("flash-attn enabled with torch_dtype=bfloat16 (compat path)")
@@ -1062,6 +1081,7 @@ class Qwen3TTSVoiceCloner:
                 self.model = Qwen3TTSModel.from_pretrained(
                     model_config["model_id"],
                     attn_implementation="flash_attention_2",
+                    **model_kwargs_revision,
                     **model_kwargs_dtype,
                 )
                 print("flash-attn enabled with dtype=bfloat16")
@@ -1070,12 +1090,14 @@ class Qwen3TTSVoiceCloner:
             try:
                 self.model = Qwen3TTSModel.from_pretrained(
                     model_config["model_id"],
+                    **model_kwargs_revision,
                     **model_kwargs_dtype,
                 )
             except TypeError as td_error:
                 print(f"dtype path failed without flash-attn ({td_error}); retrying with torch_dtype")
                 self.model = Qwen3TTSModel.from_pretrained(
                     model_config["model_id"],
+                    **model_kwargs_revision,
                     **model_kwargs_torch_dtype,
                 )
         except Exception as flash_type_error:
@@ -1083,12 +1105,14 @@ class Qwen3TTSVoiceCloner:
             try:
                 self.model = Qwen3TTSModel.from_pretrained(
                     model_config["model_id"],
+                    **model_kwargs_revision,
                     **model_kwargs_dtype,
                 )
             except TypeError as fallback_td_error:
                 print(f"fallback dtype path failed ({fallback_td_error}); retrying with torch_dtype")
                 self.model = Qwen3TTSModel.from_pretrained(
                     model_config["model_id"],
+                    **model_kwargs_revision,
                     **model_kwargs_torch_dtype,
                 )
 

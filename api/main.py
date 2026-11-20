@@ -986,13 +986,26 @@ async def save_voice(
         storage = VoiceStorage()
 
         voice_id = str(uuid.uuid4())
-        result = await storage.save_voice.remote.aio(
-            voice_id=voice_id,
-            name=name.strip(),
-            ref_text=ref_text.strip(),
-            language=language,
-            prompt_bytes=prompt_bytes,
-        )
+        logger.info("[save-voice] persisting voice metadata voice_id=%s name=%s", voice_id, name.strip())
+        save_timeout_seconds = 60
+        try:
+            result = await asyncio.wait_for(
+                storage.save_voice.remote.aio(
+                    voice_id=voice_id,
+                    name=name.strip(),
+                    ref_text=ref_text.strip(),
+                    language=language,
+                    prompt_bytes=prompt_bytes,
+                ),
+                timeout=save_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.exception("[save-voice] timeout persisting voice metadata voice_id=%s", voice_id)
+            raise HTTPException(
+                status_code=504,
+                detail="Saving voice timed out. Please try again.",
+            )
+        logger.info("[save-voice] voice metadata persisted voice_id=%s", voice_id)
 
         if not result.get("success"):
             raise HTTPException(status_code=400, detail=result.get("error", "Failed to save voice"))

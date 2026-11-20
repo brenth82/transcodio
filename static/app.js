@@ -132,6 +132,7 @@ const translations = {
         'toast.voice_name_too_long': 'Name cannot exceed 50 characters',
         'toast.voice_saved': 'Voice saved successfully!',
         'toast.voice_save_error': 'Error saving voice',
+        'toast.voice_save_timeout': 'Saving voice timed out. Please try again.',
         'toast.voice_deleted': 'Voice deleted',
         'toast.voice_delete_error': 'Error deleting voice',
         'toast.voices_load_error': 'Error loading voices',
@@ -276,6 +277,7 @@ const translations = {
         'toast.voice_name_too_long': 'El nombre no puede exceder 50 caracteres',
         'toast.voice_saved': 'Voz guardada exitosamente!',
         'toast.voice_save_error': 'Error al guardar la voz',
+        'toast.voice_save_timeout': 'Tiempo de espera agotado al guardar la voz. Intenta de nuevo.',
         'toast.voice_deleted': 'Voz eliminada',
         'toast.voice_delete_error': 'Error al eliminar la voz',
         'toast.voices_load_error': 'Error al cargar voces',
@@ -1853,10 +1855,15 @@ async function saveVoice() {
         formData.append('ref_text', refText);
         formData.append('language', language);
 
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 90000);
+
         const response = await fetch('/api/voices', {
             method: 'POST',
             body: formData,
+            signal: controller.signal,
         });
+        clearTimeout(timeoutId);
 
         const result = await response.json();
 
@@ -1880,7 +1887,10 @@ async function saveVoice() {
 
     } catch (error) {
         console.error('Save voice error:', error);
-        showToast(error.message, 'error');
+        const message = error.name === 'AbortError'
+            ? t('toast.voice_save_timeout')
+            : error.message;
+        showToast(message, 'error');
         voiceCloneProcessing.classList.add('hidden');
         voiceCloneSection.classList.remove('hidden');
     }
