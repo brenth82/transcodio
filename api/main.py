@@ -9,14 +9,17 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 import asyncio
+from contextlib import aclosing
+import json
 import uuid
 import time
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request, Security
+from fastapi import APIRouter, FastAPI, File, UploadFile, HTTPException, Form, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse, Response
+from fastapi.routing import APIRoute
 from fastapi.security import APIKeyHeader
 from starlette.middleware.base import BaseHTTPMiddleware
 from sse_starlette.sse import EventSourceResponse
@@ -253,6 +256,91 @@ app = FastAPI(
     description=config.API_DESCRIPTION,
 )
 
+
+class TTSFormRoute(APIRoute):
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def parse_tts_form(request: Request):
+            # FastAPI reuses the parsed form. Allow up to four UTF-8 bytes per character.
+            async with request.form(max_part_size=4 * config.VOICE_CLONE_MAX_TARGET_TEXT):
+                return await handler(request)
+
+        return parse_tts_form
+
+
+tts_router = APIRouter(route_class=TTSFormRoute)
+
+
+def _get_tts_model(target_text: str):
+    import modal
+
+    model = modal.Cls.from_name(config.MODAL_APP_NAME, "Qwen3TTSVoiceCloner")
+    if len(target_text) > config.TTS_LONG_TEXT_THRESHOLD:
+        model = model.with_options(timeout=config.TTS_LONG_TIMEOUT, memory=config.TTS_LONG_MEMORY_MB)
+    return model()
+
+
+async def _watch_tts_progress(model, *args):
+    """Time out active synthesis that stops completing chunks."""
+    loop = asyncio.get_running_loop()
+    expires_at = None
+    completed_chunks = 0
+    call_id = None
+    async with aclosing(model.generate_voice_clone_stream.remote_gen.aio(*args)) as events:
+        while True:
+            timeout = asyncio.timeout_at(expires_at)
+            try:
+                async with timeout:
+                    event = await anext(events)
+            except StopAsyncIteration:
+                return
+            except TimeoutError:
+                if not timeout.expired():
+                    raise
+                if call_id:
+                    import modal
+
+                    try:
+                        async with asyncio.timeout(10):
+                            await modal.FunctionCall.from_id(call_id).cancel.aio(
+                                terminate_containers=True
+                            )
+                    except Exception:
+                        logger.exception("Could not cancel stalled TTS call %s", call_id)
+                raise HTTPException(
+                    status_code=504,
+                    detail="Synthesis stopped after making no progress. Please try a shorter section of text.",
+                ) from None
+
+            if isinstance(event, (bytes, bytearray)):
+                event = event.decode("utf-8", errors="replace")
+            if isinstance(event, str):
+                try:
+                    event = json.loads(event)
+                except json.JSONDecodeError:
+                    event = {"type": "status", "message": event}
+            if not isinstance(event, dict):
+                continue
+
+            if event.get("type") == "status":
+                call_id = event.get("call_id") or call_id
+                if expires_at is None:
+                    expires_at = loop.time() + config.TTS_STALL_TIMEOUT
+                progress = _parse_tts_status_message(event.get("message", ""))
+                if progress.get("chunk_current", 0) > completed_chunks:
+                    completed_chunks = progress["chunk_current"]
+                    timeout_seconds = (
+                        config.TTS_FINALIZE_TIMEOUT
+                        if completed_chunks == progress["chunk_total"]
+                        else config.TTS_STALL_TIMEOUT
+                    )
+                    expires_at = loop.time() + timeout_seconds
+            yield event
+            if event.get("type") in {"complete", "error"}:
+                return
+
+
 # Attach rate limiter state
 app.state.limiter = limiter
 
@@ -307,7 +395,7 @@ async def root():
     """Serve the main web UI."""
     index_path = Path(__file__).parent.parent / "static" / "index.html"
     if index_path.exists():
-        return FileResponse(index_path)
+        return FileResponse(index_path, headers={"Cache-Control": "no-cache"})
     return HTMLResponse(
         content="<h1>Transcodio Transcription Service</h1><p>Upload an audio file to /api/transcribe</p>",
         status_code=200,
@@ -677,7 +765,7 @@ async def transcribe_audio_stream(
         )
 
 
-@app.post("/api/voice-clone", response_model=VoiceCloneResponse)
+@tts_router.post("/api/voice-clone", response_model=VoiceCloneResponse)
 @limiter.limit(config.RATE_LIMIT_VOICE_CLONE)
 async def voice_clone(
     request: Request,
@@ -730,6 +818,8 @@ async def voice_clone(
                 detail=f"Unsupported language. Supported: {', '.join(config.VOICE_CLONE_LANGUAGES)}"
             )
 
+        # Browsers serialize textarea line breaks as CRLF in multipart forms.
+        target_text = target_text.replace("\r\n", "\n")
         # Validate target text length
         if len(target_text) > config.VOICE_CLONE_MAX_TARGET_TEXT:
             raise HTTPException(
@@ -787,12 +877,9 @@ async def voice_clone(
 
         # Import Modal and lookup TTS model based on selection
         try:
-            import modal
-
             t_modal_lookup_start = time.perf_counter()
             logger.info("[voice-clone:%s] resolving Modal class %s", request_trace, "Qwen3TTSVoiceCloner")
-            TTSModel = modal.Cls.from_name(config.MODAL_APP_NAME, "Qwen3TTSVoiceCloner")
-            model = TTSModel()
+            model = _get_tts_model(target_text)
             t_modal_lookup = time.perf_counter() - t_modal_lookup_start
         except Exception as e:
             raise HTTPException(
@@ -804,13 +891,22 @@ async def voice_clone(
         try:
             t_remote_start = time.perf_counter()
             logger.info("[voice-clone:%s] invoking Modal TTS (chars=%s, language=%s)", request_trace, len(target_text), language)
-            result = await model.generate_voice_clone.remote.aio(
+            result = None
+            async for event in _watch_tts_progress(
+                model,
                 preprocessed_ref,
                 ref_text,
                 target_text,
                 language,
                 request_trace,
-            )
+            ):
+                if event.get("type") == "error":
+                    raise HTTPException(status_code=500, detail="Voice cloning failed. Please try again.")
+                if event.get("type") == "complete":
+                    result = event.get("result")
+
+            if result is None:
+                raise HTTPException(status_code=500, detail="Voice cloning failed: no result returned.")
             t_remote = time.perf_counter() - t_remote_start
 
             if not result.get("success"):
@@ -1054,7 +1150,7 @@ async def delete_voice(request: Request, voice_id: str):
         raise HTTPException(status_code=500, detail="An unexpected error occurred.")
 
 
-@app.post("/api/synthesize", response_model=SynthesizeResponse)
+@tts_router.post("/api/synthesize", response_model=SynthesizeResponse)
 @limiter.limit(config.RATE_LIMIT_VOICE_CLONE)
 async def synthesize_with_voice(
     request: Request,
@@ -1066,7 +1162,7 @@ async def synthesize_with_voice(
 
     Args:
         voice_id: ID of the saved voice
-        target_text: Text to synthesize (max 500 characters)
+        target_text: Text to synthesize
 
     Returns:
         SynthesizeResponse with audio_session_id for playback/download
@@ -1078,6 +1174,7 @@ async def synthesize_with_voice(
         raise HTTPException(status_code=503, detail="Voice cloning is disabled")
 
     # Validate target text
+    target_text = target_text.replace("\r\n", "\n")
     if not target_text or len(target_text.strip()) == 0:
         raise HTTPException(status_code=400, detail="Target text cannot be empty")
     if len(target_text) > config.VOICE_CLONE_MAX_TARGET_TEXT:
@@ -1143,8 +1240,7 @@ async def synthesize_with_voice(
         # Generate audio with TTS
         t_modal_lookup_start = time.perf_counter()
         logger.info("[synthesize:%s] resolving Modal class %s", request_trace, "Qwen3TTSVoiceCloner")
-        TTSModel = modal.Cls.from_name(config.MODAL_APP_NAME, "Qwen3TTSVoiceCloner")
-        model = TTSModel()
+        model = _get_tts_model(target_text)
         t_modal_lookup = time.perf_counter() - t_modal_lookup_start
 
         t_remote_start = time.perf_counter()
@@ -1160,13 +1256,12 @@ async def synthesize_with_voice(
             metadata["language"],
             voice_id,
         )
-        import json
-
         result = None
         stream_had_progress = False
         stream_error_message = None
         try:
-            async for synth_event in model.generate_voice_clone_stream.remote_gen.aio(
+            async for synth_event in _watch_tts_progress(
+                model,
                 None,  # ref_audio_bytes not needed; using cached prompt
                 metadata.get("ref_text", ""),
                 target_text.strip(),
@@ -1174,23 +1269,6 @@ async def synthesize_with_voice(
                 request_trace,
                 prompt_bytes,  # use cached prompt directly
             ):
-                # Modal generators may surface payloads as dicts, JSON strings, or bytes.
-                if isinstance(synth_event, (bytes, bytearray)):
-                    synth_event = synth_event.decode("utf-8", errors="replace")
-                if isinstance(synth_event, str):
-                    try:
-                        synth_event = json.loads(synth_event)
-                    except json.JSONDecodeError:
-                        # Treat non-JSON status lines as progress messages.
-                        synth_event = {"type": "status", "message": synth_event}
-                if not isinstance(synth_event, dict):
-                    print(
-                        f"[synthesize:{request_trace}] unexpected stream event type="
-                        f"{type(synth_event)} value={synth_event!r}",
-                        flush=True,
-                    )
-                    continue
-
                 event_type = synth_event.get("type")
                 if event_type == "status":
                     message = synth_event.get("message", "")
@@ -1299,7 +1377,7 @@ async def synthesize_with_voice(
         raise HTTPException(status_code=500, detail="An unexpected error occurred.")
 
 
-@app.post("/api/synthesize/stream")
+@tts_router.post("/api/synthesize/stream")
 @limiter.limit(config.RATE_LIMIT_VOICE_CLONE)
 async def synthesize_with_voice_stream(
     request: Request,
@@ -1313,6 +1391,7 @@ async def synthesize_with_voice_stream(
     if not config.ENABLE_VOICE_CLONING:
         raise HTTPException(status_code=503, detail="Voice cloning is disabled")
 
+    target_text = target_text.replace("\r\n", "\n")
     if not target_text or len(target_text.strip()) == 0:
         raise HTTPException(status_code=400, detail="Target text cannot be empty")
     if len(target_text) > config.VOICE_CLONE_MAX_TARGET_TEXT:
@@ -1322,8 +1401,6 @@ async def synthesize_with_voice_stream(
         )
 
     import modal
-    import json
-
     request_trace = uuid.uuid4().hex[:8]
     VoiceStorage = modal.Cls.from_name(config.MODAL_APP_NAME, "VoiceStorage")
     storage = VoiceStorage()
@@ -1348,12 +1425,12 @@ async def synthesize_with_voice_stream(
         await storage.save_voice_prompt.remote.aio(voice_id, prompt_bytes)
 
     async def event_generator():
-        TTSModel = modal.Cls.from_name(config.MODAL_APP_NAME, "Qwen3TTSVoiceCloner")
-        model = TTSModel()
         result = None
 
         try:
-            async for synth_event in model.generate_voice_clone_stream.remote_gen.aio(
+            model = _get_tts_model(target_text)
+            async for synth_event in _watch_tts_progress(
+                model,
                 None,
                 metadata.get("ref_text", ""),
                 target_text.strip(),
@@ -1361,17 +1438,6 @@ async def synthesize_with_voice_stream(
                 request_trace,
                 prompt_bytes,
             ):
-                if isinstance(synth_event, (bytes, bytearray)):
-                    synth_event = synth_event.decode("utf-8", errors="replace")
-                if isinstance(synth_event, str):
-                    try:
-                        synth_event = json.loads(synth_event)
-                    except json.JSONDecodeError:
-                        synth_event = {"type": "status", "message": synth_event}
-
-                if not isinstance(synth_event, dict):
-                    continue
-
                 event_type = synth_event.get("type")
                 if event_type == "status":
                     yield {
@@ -1420,6 +1486,11 @@ async def synthesize_with_voice_stream(
                     "audio_session_id": session_id,
                     "duration": result.get("duration"),
                 }),
+            }
+        except HTTPException as error:
+            yield {
+                "event": "error",
+                "data": json.dumps({"error": error.detail}),
             }
         except Exception:
             logger.exception("[synthesize-stream:%s] unexpected server error", request_trace)
@@ -1578,6 +1649,9 @@ async def generate_image(
             status_code=500,
             detail="An unexpected error occurred.",
         )
+
+
+app.include_router(tts_router)
 
 
 if __name__ == "__main__":

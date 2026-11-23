@@ -11,7 +11,7 @@ Meeting minutes are not included in this version of the repo. That feature may b
 
 - **Real-time Streaming Transcription**: Progressive results via SSE with silence-based segmentation using NVIDIA Parakeet TDT 0.6B v3
 - **Speaker Diarization**: Automatic speaker identification using NVIDIA TitaNet embeddings + AgglomerativeClustering
-- **Voice Cloning**: Clone any voice with Qwen3-TTS — upload or record reference audio (up to 5 minutes), then synthesize up to 50,000 characters of text. The Modal TTS container is pinned to the Qwen3-TTS source build at commit `1ab0dd75353392f28a0d05d9ca960c9954b13c83` and installs `flash-attn==2.8.3` with `--no-build-isolation`.
+- **Voice Cloning**: Clone any voice with Qwen3-TTS — upload or record reference audio (up to 5 minutes), then synthesize up to 350,000 characters of text. The Modal TTS container is pinned to the Qwen3-TTS source build at commit `022e286b98fbec7e1e916cb940cdf532cd9f488e` and installs `flash-attn==2.8.3` with `--no-build-isolation`.
 - **Saved Voice Profiles**: Persistently store voice profiles in Modal Volume for reuse without re-uploading
 - **Image Generation**: Text-to-image using FLUX.1-schnell with 4-step inference (~3-5 seconds per image)
 - **Audio Playback**: Integrated player to listen to uploaded audio alongside transcription
@@ -103,9 +103,11 @@ The UI has three modes, with English as the default language. Click the **ES/EN*
 1. Choose a saved voice or create a new one
 2. For new voices: upload reference audio (3s–5min) or record with your microphone
 3. Enter the reference transcription and select the language
-4. Enter target text to synthesize (up to 50,000 characters)
+4. Enter target text to synthesize (up to 350,000 characters)
 5. Click Generate — listen to and download the result
 6. Optionally save the voice profile for reuse
+
+Once synthesis starts, Transcodio stops the request after three minutes without a completed chunk. After the final chunk, it allows up to 15 minutes to assemble and return the audio.
 
 **Image Generation**
 1. Enter a text prompt (up to 500 characters)
@@ -300,7 +302,7 @@ DIARIZATION_MAX_SPEAKERS = 5
 
 # Voice Cloning
 VOICE_CLONE_MAX_REF_DURATION = 300   # 5 minutes
-VOICE_CLONE_MAX_TARGET_TEXT = 50000  # characters
+VOICE_CLONE_MAX_TARGET_TEXT = 350_000  # characters
 MAX_SAVED_VOICES = 50
 
 # Image Generation

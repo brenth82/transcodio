@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Transcodio</title>
-    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/styles.css?v=20261123">
 </head>
 <body>
     <div class="container">
@@ -70,10 +70,10 @@
                     <input type="file" id="fileInput" accept="audio/*" hidden>
                 </div>
                 <div class="upload-options">
-                    <label class="checkbox-label" for="enableDiarization">
-                        <input type="checkbox" id="enableDiarization">
-                        <span class="checkbox-text" data-i18n="upload.identify_speakers">Identify speakers</span>
-                    </label>
+                    <div class="checkbox-option">
+                        <input type="checkbox" id="enableDiarization" name="enable_diarization">
+                        <label for="enableDiarization" class="checkbox-text" data-i18n="upload.identify_speakers">Identify speakers</label>
+                    </div>
                 </div>
             </section>
 
@@ -183,9 +183,9 @@
 
                         <!-- Target Text for Saved Voice -->
                         <div class="voice-clone-form-group" id="savedVoiceTargetGroup">
-                            <label class="form-label" for="savedVoiceTargetText" data-i18n="voice.target_label">Text to Synthesize (max. 50000 characters)</label>
-                            <textarea id="savedVoiceTargetText" class="form-textarea" data-i18n-placeholder="voice.target_placeholder" placeholder="Write the text you want to generate with the selected voice..." rows="4" maxlength="50000"></textarea>
-                            <div class="char-counter"><span id="savedVoiceCharCount">0</span> / 50000</div>
+                            <label class="form-label" for="savedVoiceTargetText" data-i18n="voice.target_label">Text to Synthesize (max. 350,000 characters)</label>
+                            <textarea id="savedVoiceTargetText" class="form-textarea" data-i18n-placeholder="voice.target_placeholder" placeholder="Write the text you want to generate with the selected voice..." rows="4"></textarea>
+                            <div class="char-counter"><span id="savedVoiceCharCount">0</span> / 350000</div>
                         </div>
 
                         <!-- Generate Button for Saved Voice -->
@@ -256,9 +256,9 @@
 
                     <!-- Target Text -->
                     <div class="voice-clone-form-group">
-                        <label class="form-label" for="targetTextInput" data-i18n="voice.new_target_label">Text to Synthesize (max. 50000 characters)</label>
-                        <textarea id="targetTextInput" class="form-textarea" data-i18n-placeholder="voice.new_target_placeholder" placeholder="Write the text you want to generate with the cloned voice..." rows="4" maxlength="50000"></textarea>
-                        <div class="char-counter"><span id="charCount">0</span> / 50000</div>
+                        <label class="form-label" for="targetTextInput" data-i18n="voice.new_target_label">Text to Synthesize (max. 350,000 characters)</label>
+                        <textarea id="targetTextInput" class="form-textarea" data-i18n-placeholder="voice.new_target_placeholder" placeholder="Write the text you want to generate with the cloned voice..." rows="4"></textarea>
+                        <div class="char-counter"><span id="charCount">0</span> / 350000</div>
                     </div>
 
                     <!-- Model Selector -->
@@ -456,6 +456,6 @@
     <!-- Toast Notification -->
     <div class="toast hidden" id="toast" role="alert" aria-live="assertive" aria-atomic="true"></div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20261123"></script>
 </body>
 </html>

@@ -2,6 +2,8 @@
 // i18n System
 // ============================================
 
+const MAX_TTS_CHARACTERS = 350_000;
+
 const translations = {
     en: {
         // Mode buttons
@@ -37,7 +39,7 @@ const translations = {
         'voice.loading': 'Loading voices...',
         'voice.no_voices': 'No saved voices.',
         'voice.create_new': 'Create New Voice',
-        'voice.target_label': 'Text to Synthesize (max. 50000 characters)',
+        'voice.target_label': 'Text to Synthesize (max. 350,000 characters)',
         'voice.target_placeholder': 'Write the text you want to generate with the selected voice...',
         'voice.synthesize': 'Synthesize',
         'voice.ref_audio_label': 'Reference Audio (3-30 seconds)',
@@ -46,7 +48,7 @@ const translations = {
         'voice.upload_drag': 'Drag or click to upload',
         'voice.ref_text_label': 'Reference Audio Transcription',
         'voice.ref_text_placeholder': 'Write exactly what the reference audio says...',
-        'voice.new_target_label': 'Text to Synthesize (max. 50000 characters)',
+        'voice.new_target_label': 'Text to Synthesize (max. 350,000 characters)',
         'voice.new_target_placeholder': 'Write the text you want to generate with the cloned voice...',
         'voice.model_label': 'TTS Model',
         'voice.model_qwen': 'Qwen3-TTS (Fast, 1.7B)',
@@ -115,7 +117,7 @@ const translations = {
         'toast.no_ref_audio': 'Please upload or record a reference audio',
         'toast.no_ref_text': 'Please write the reference audio transcription',
         'toast.no_target_text': 'Please write the text to synthesize',
-        'toast.target_too_long': 'Text to synthesize cannot exceed 50000 characters',
+        'toast.target_too_long': 'Text to synthesize cannot exceed 350,000 characters',
         'toast.voice_generated': 'Voice generated successfully!',
         'toast.voice_gen_error': 'Error generating voice',
         'toast.no_audio_download': 'No audio to download',
@@ -182,7 +184,7 @@ const translations = {
         'voice.loading': 'Cargando voces...',
         'voice.no_voices': 'No hay voces guardadas.',
         'voice.create_new': 'Crear Nueva Voz',
-        'voice.target_label': 'Texto a Sintetizar (max. 50000 caracteres)',
+        'voice.target_label': 'Texto a sintetizar (máx. 350.000 caracteres)',
         'voice.target_placeholder': 'Escribe el texto que quieres generar con la voz seleccionada...',
         'voice.synthesize': 'Sintetizar',
         'voice.ref_audio_label': 'Audio de Referencia (3-30 segundos)',
@@ -191,7 +193,7 @@ const translations = {
         'voice.upload_drag': 'Arrastra o haz clic para subir',
         'voice.ref_text_label': 'Transcripci\u00f3n del Audio de Referencia',
         'voice.ref_text_placeholder': 'Escribe exactamente lo que dice el audio de referencia...',
-        'voice.new_target_label': 'Texto a Sintetizar (max. 50000 caracteres)',
+        'voice.new_target_label': 'Texto a sintetizar (máx. 350.000 caracteres)',
         'voice.new_target_placeholder': 'Escribe el texto que quieres generar con la voz clonada...',
         'voice.model_label': 'Modelo TTS',
         'voice.model_qwen': 'Qwen3-TTS (R\u00e1pido, 1.7B)',
@@ -260,7 +262,7 @@ const translations = {
         'toast.no_ref_audio': 'Por favor sube o graba un audio de referencia',
         'toast.no_ref_text': 'Por favor escribe la transcripci\u00f3n del audio de referencia',
         'toast.no_target_text': 'Por favor escribe el texto a sintetizar',
-        'toast.target_too_long': 'El texto a sintetizar no puede exceder 50000 caracteres',
+        'toast.target_too_long': 'El texto a sintetizar no puede exceder 350.000 caracteres',
         'toast.voice_generated': 'Voz generada exitosamente!',
         'toast.voice_gen_error': 'Error al generar la voz',
         'toast.no_audio_download': 'No hay audio para descargar',
@@ -1042,6 +1044,7 @@ function switchMode(mode) {
     // Show/hide sections based on mode
     if (mode === 'transcription') {
         uploadSection.classList.remove('hidden');
+        enableDiarizationCheckbox.focus();
     } else if (mode === 'voice-clone') {
         voiceCloneSection.classList.remove('hidden');
         // Load saved voices when switching to voice clone mode
@@ -1180,8 +1183,16 @@ function removeRecordedAudioFile() {
 }
 
 // Character Counter
+function countCharacters(text) {
+    let count = 0;
+    for (const character of text) {
+        count += 1;
+    }
+    return count;
+}
+
 function updateCharCount() {
-    const count = targetTextInput.value.length;
+    const count = countCharacters(targetTextInput.value);
     charCount.textContent = count;
 }
 
@@ -1217,7 +1228,7 @@ async function generateVoiceClone() {
         return;
     }
 
-    if (targetText.length > 50000) {
+    if (countCharacters(targetText) > MAX_TTS_CHARACTERS) {
         showToast(t('toast.target_too_long'), 'error');
         return;
     }
@@ -1587,7 +1598,7 @@ function updateSynthesizeButton() {
 
 // Update character count for saved voice target text
 function updateSavedVoiceCharCount() {
-    const count = savedVoiceTargetText.value.length;
+    const count = countCharacters(savedVoiceTargetText.value);
     savedVoiceCharCount.textContent = count;
     updateSynthesizeButton();
 }
@@ -1679,7 +1690,7 @@ async function synthesizeWithSavedVoice() {
         return;
     }
 
-    if (targetText.length > 50000) {
+    if (countCharacters(targetText) > MAX_TTS_CHARACTERS) {
         showToast(t('toast.target_too_long'), 'error');
         return;
     }

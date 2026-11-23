@@ -172,7 +172,7 @@ DEFAULT_TTS_MODEL = "qwen"
 TTS_CONTAINER_IDLE_TIMEOUT = 120
 VOICE_CLONE_MIN_REF_DURATION = 3    # seconds
 VOICE_CLONE_MAX_REF_DURATION = 300  # seconds (5 minutes)
-VOICE_CLONE_MAX_TARGET_TEXT = 50000 # characters
+VOICE_CLONE_MAX_TARGET_TEXT = 350_000 # characters
 VOICE_CLONE_SAMPLE_RATE = 24000
 VOICE_CLONE_LANGUAGES = [
     "English", "Spanish", "Chinese", "Japanese", "Korean",
@@ -246,6 +246,8 @@ uv run python api/main.py
 ```
 
 ### Testing
+
+Stop any temporary servers and close terminal sessions you started once testing is complete.
 
 ```bash
 # Test Modal function directly (bypasses FastAPI)
@@ -472,7 +474,7 @@ Uses Qwen3-TTS (1.7B params, 24kHz) for voice cloning with zero-shot voice trans
 ENABLE_VOICE_CLONING = True
 VOICE_CLONE_MIN_REF_DURATION = 3    # seconds
 VOICE_CLONE_MAX_REF_DURATION = 300  # seconds (5 minutes)
-VOICE_CLONE_MAX_TARGET_TEXT = 50000 # characters
+VOICE_CLONE_MAX_TARGET_TEXT = 350_000 # characters
 VOICE_CLONE_SAMPLE_RATE = 24000
 VOICE_CLONE_LANGUAGES = [
     "English", "Spanish", "Chinese", "Japanese", "Korean",
@@ -482,7 +484,7 @@ VOICE_CLONE_LANGUAGES = [
 
 **Validation rules:**
 - Reference audio: 3s–300s duration, max 15MB file size
-- Target text: 1–50,000 characters
+- Target text: 1–350,000 characters
 - Reference text: cannot be empty
 - Language: must be in `VOICE_CLONE_LANGUAGES` list
 

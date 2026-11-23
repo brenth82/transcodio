@@ -145,7 +145,12 @@ DEFAULT_TTS_MODEL = "qwen"
 # Voice Cloning Constraints
 VOICE_CLONE_MIN_REF_DURATION = 3   # seconds
 VOICE_CLONE_MAX_REF_DURATION = 300  # seconds (5 minutes)
-VOICE_CLONE_MAX_TARGET_TEXT = 50000  # characters
+VOICE_CLONE_MAX_TARGET_TEXT = 350_000  # Unicode characters
+TTS_LONG_TEXT_THRESHOLD = 50_000
+TTS_LONG_TIMEOUT = 8 * 3600
+TTS_LONG_MEMORY_MB = 24 * 1024
+TTS_STALL_TIMEOUT = 180  # seconds without completed chunks after synthesis starts
+TTS_FINALIZE_TIMEOUT = 900  # seconds to assemble and deliver audio after the last chunk
 VOICE_CLONE_SAMPLE_RATE = 24000
 
 VOICE_CLONE_LANGUAGES = [

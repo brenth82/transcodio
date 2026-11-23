@@ -1172,6 +1172,7 @@ class Qwen3TTSVoiceCloner:
         yield {
             "type": "status",
             "stage": "start",
+            "call_id": modal.current_function_call_id(),
             "message": f"[tts:{request_trace or 'modal'}] synthesis started",
         }
 
