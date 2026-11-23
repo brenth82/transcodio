@@ -313,7 +313,7 @@ MAX_DURATION_SECONDS = 3600  # 60 minutes
 
 # Performance
 MODAL_CONTAINER_IDLE_TIMEOUT = 120
-ENABLE_GPU_MEMORY_SNAPSHOT = True  # 85-90% faster cold starts
+ENABLE_QWEN_GPU_MEMORY_SNAPSHOT = True  # Speeds up voice synthesis cold starts
 
 # Security
 API_KEY = os.getenv("TRANSCODIO_API_KEY", "")  # Empty = no auth (dev)
@@ -374,7 +374,7 @@ transcodio/
 py -m modal deploy modal_app/app.py
 ```
 
-**Slow first request** — Cold start takes 30-60s. GPU memory snapshots are enabled by default for 85-90% faster subsequent cold starts.
+**Slow first request** — Transcription and speaker identification load their models at container startup. Qwen3-TTS uses CPU and GPU memory snapshots to speed up voice synthesis cold starts.
 
 **Image generation not working** — Check the HuggingFace token secret:
 ```bash

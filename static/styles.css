@@ -635,33 +635,17 @@ body {
 }
 
 .checkbox-label input[type="checkbox"] {
-    display: none;
-}
-
-.checkbox-custom {
     width: 20px;
     height: 20px;
-    border: 2px solid var(--border);
-    border-radius: 4px;
-    position: relative;
-    transition: all 0.2s ease;
+    margin: 0;
+    flex-shrink: 0;
+    accent-color: var(--primary);
+    cursor: pointer;
 }
 
-.checkbox-label input[type="checkbox"]:checked + .checkbox-custom {
-    background: var(--gradient);
-    border-color: var(--primary);
-}
-
-.checkbox-label input[type="checkbox"]:checked + .checkbox-custom::after {
-    content: '';
-    position: absolute;
-    left: 6px;
-    top: 2px;
-    width: 5px;
-    height: 10px;
-    border: solid white;
-    border-width: 0 2px 2px 0;
-    transform: rotate(45deg);
+.checkbox-label:focus-within {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
 }
 
 .checkbox-text {

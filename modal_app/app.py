@@ -18,13 +18,14 @@ import modal
 MODAL_APP_NAME = "transcodio-app"
 MODAL_VOLUME_NAME = "parakeet-models"
 MODAL_GPU_TYPE = "L4"
+MODAL_GPU_FALLBACK_TYPE = "A10G"
 MODAL_CONTAINER_IDLE_TIMEOUT = 20
 MODAL_TIMEOUT = 3600
 MODAL_MEMORY_MB = 8192
 
 # Cold start optimization flags
-ENABLE_CPU_MEMORY_SNAPSHOT = True
-ENABLE_GPU_MEMORY_SNAPSHOT = True
+ENABLE_QWEN_CPU_MEMORY_SNAPSHOT = True
+ENABLE_QWEN_GPU_MEMORY_SNAPSHOT = True
 ENABLE_MODEL_WARMUP = False
 EXTENDED_IDLE_TIMEOUT = False
 EXTENDED_IDLE_TIMEOUT_SECONDS = 300
@@ -36,6 +37,7 @@ SAMPLE_RATE = 16000
 # Silence detection
 SILENCE_THRESHOLD_DB = -40
 SILENCE_MIN_LENGTH_MS = 700
+STT_MAX_CHUNK_MS = 30_000  # Bound Parakeet's attention memory on long recordings
 
 # Speaker diarization
 ENABLE_SPEAKER_DIARIZATION = True
@@ -48,7 +50,7 @@ DIARIZATION_SHIFT_LENGTH = 0.75
 # Voice cloning
 QWEN_TTS_SOURCE_REF = (
     "git+https://github.com/QwenLM/Qwen3-TTS.git"
-    "@1ab0dd75353392f28a0d05d9ca960c9954b13c83"
+    "@022e286b98fbec7e1e916cb940cdf532cd9f488e"
 )
 TTS_MODELS = {
     "qwen": {
@@ -116,6 +118,7 @@ stt_image = (
         "nemo_toolkit[asr]==2.3.0",
         "cuda-python==12.8.0",
         "numpy<2",
+        "pyarrow<26",  # NeMo's datasets dependency still runs with NumPy 1.x
         "pydub==0.25.1",
         "scikit-learn>=1.3.0",  # For spectral clustering
         "soundfile>=0.12.1",    # For audio file I/O
@@ -182,10 +185,10 @@ app = modal.App(MODAL_APP_NAME)
 # Create Modal Volume for persistent model storage
 volume = modal.Volume.from_name(MODAL_VOLUME_NAME, create_if_missing=True)
 
-# Build decorator arguments based on optimization flags
-decorator_kwargs = {
+# Build decorator arguments for transcription and speaker identification.
+stt_decorator_kwargs = {
     "image": stt_image,
-    "gpu": MODAL_GPU_TYPE,
+    "gpu": [MODAL_GPU_TYPE, MODAL_GPU_FALLBACK_TYPE],
     "scaledown_window": (
         EXTENDED_IDLE_TIMEOUT_SECONDS
         if EXTENDED_IDLE_TIMEOUT
@@ -197,26 +200,12 @@ decorator_kwargs = {
 }
 
 # Print configuration summary
-print(f"GPU Type: {MODAL_GPU_TYPE}")
+print(f"Transcription GPU: {MODAL_GPU_TYPE} with {MODAL_GPU_FALLBACK_TYPE} fallback")
 print(f"Memory: {MODAL_MEMORY_MB}MB")
-print(f"Container idle timeout: {decorator_kwargs['scaledown_window']}s")
-
-# Add CPU memory snapshot if enabled
-if ENABLE_CPU_MEMORY_SNAPSHOT:
-    decorator_kwargs["enable_memory_snapshot"] = True
-    print(f"CPU Memory Snapshots: ENABLED")
-
-# Add GPU memory snapshot if enabled (requires CPU snapshots)
-if ENABLE_GPU_MEMORY_SNAPSHOT:
-    if not ENABLE_CPU_MEMORY_SNAPSHOT:
-        raise ValueError(
-            "ENABLE_GPU_MEMORY_SNAPSHOT requires ENABLE_CPU_MEMORY_SNAPSHOT to be True"
-        )
-    decorator_kwargs["experimental_options"] = {"enable_gpu_snapshot": True}
-    print(f"GPU Memory Snapshots: ENABLED (Experimental)")
+print(f"Container idle timeout: {stt_decorator_kwargs['scaledown_window']}s")
 
 
-# Build Qwen TTS decorator arguments (snapshot flags applied here as well)
+# Build Qwen TTS decorator arguments.
 qwen_decorator_kwargs = {
     "image": qwen_tts_image,
     "gpu": TTS_MODELS["qwen"]["gpu_type"],
@@ -226,10 +215,12 @@ qwen_decorator_kwargs = {
     "volumes": {"/models": volume},
 }
 
-if ENABLE_CPU_MEMORY_SNAPSHOT:
+if ENABLE_QWEN_CPU_MEMORY_SNAPSHOT:
     qwen_decorator_kwargs["enable_memory_snapshot"] = True
 
-if ENABLE_GPU_MEMORY_SNAPSHOT:
+if ENABLE_QWEN_GPU_MEMORY_SNAPSHOT:
+    if not ENABLE_QWEN_CPU_MEMORY_SNAPSHOT:
+        raise ValueError("Qwen GPU memory snapshots require Qwen CPU memory snapshots")
     qwen_decorator_kwargs["experimental_options"] = {"enable_gpu_snapshot": True}
 
 
@@ -293,11 +284,24 @@ def align_speakers_to_segments(transcription_segments: list, speaker_timeline: l
     return transcription_segments
 
 
-@app.cls(**decorator_kwargs)
+def _stt_pcm_bytes(audio_bytes: bytes) -> bytes:
+    """Extract PCM frames from a preprocessed WAV or accept legacy raw PCM."""
+    import wave
+
+    if audio_bytes[:4] != b"RIFF" or audio_bytes[8:12] != b"WAVE":
+        return audio_bytes
+
+    with wave.open(io.BytesIO(audio_bytes), "rb") as audio:
+        if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) != (1, 2, SAMPLE_RATE):
+            raise ValueError("Expected 16-bit mono WAV audio at 16 kHz")
+        return audio.readframes(audio.getnframes())
+
+
+@app.cls(**stt_decorator_kwargs)
 class ParakeetSTTModel:
     """NVIDIA Parakeet TDT model for streaming GPU-accelerated transcription."""
 
-    @modal.enter(snap=ENABLE_CPU_MEMORY_SNAPSHOT or ENABLE_GPU_MEMORY_SNAPSHOT)
+    @modal.enter()
     def load_model(self):
         """Load Parakeet TDT model once per container (runs on container startup)."""
         import logging
@@ -325,12 +329,6 @@ class ParakeetSTTModel:
         total_time = time.time() - start_time
         print(f"Total initialization time: {total_time:.2f}s")
 
-        # Print optimization status
-        if ENABLE_CPU_MEMORY_SNAPSHOT:
-            print("-> This state will be captured in CPU memory snapshot")
-        if ENABLE_GPU_MEMORY_SNAPSHOT:
-            print("-> GPU state (including loaded model) will be captured in snapshot")
-
     def _warmup_model(self):
         """Warmup model with dummy audio to compile CUDA kernels."""
         import numpy as np
@@ -349,35 +347,52 @@ class ParakeetSTTModel:
         warmup_time = time.time() - warmup_start
         print(f"Model warm-up completed in {warmup_time:.2f}s")
 
+    def _transcribe_chunks(self, pcm_bytes: bytes) -> Iterator[tuple[int, int, str]]:
+        """Yield recognized text with millisecond bounds for each speech chunk."""
+        from itertools import chain
+
+        import numpy as np
+        from pydub import AudioSegment, silence
+
+        audio = AudioSegment(
+            data=pcm_bytes, channels=1, sample_width=2, frame_rate=SAMPLE_RATE,
+        )
+        audio_end = len(audio)
+        silent_windows = silence.detect_silence(
+            audio,
+            min_silence_len=SILENCE_MIN_LENGTH_MS,
+            silence_thresh=SILENCE_THRESHOLD_DB,
+            seek_step=10,
+        )
+
+        start = 0
+        for boundary in chain((end for _, end in silent_windows), (audio_end,)):
+            # Prefer the detected pause and cap the length even if it is far away.
+            while start < boundary:
+                end = min(start + STT_MAX_CHUNK_MS, boundary)
+                # Keep a tiny remainder from becoming a standalone model input.
+                if 0 < boundary - end < 100:
+                    end = boundary - 100
+                samples = np.frombuffer(audio[start:end].raw_data, dtype="<i2")
+                waveform = samples.astype(np.float32) / 32768.0
+                with NoStdStreams():
+                    output = self.model.transcribe([waveform])
+
+                text = output[0].text if output and hasattr(output[0], "text") else ""
+                if text.strip():
+                    yield start, end, text
+                start = end
+
     @modal.method()
     def transcribe(self, audio_bytes: bytes) -> Dict[str, Any]:
-        """
-        Transcribe complete audio file (non-streaming).
-
-        Args:
-            audio_bytes: Raw audio bytes (16-bit PCM, 16kHz, mono WAV)
-
-        Returns:
-            Dict with transcription results
-        """
-        import numpy as np
-
-        # Convert bytes to numpy array (int16 → float32)
-        audio_data = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
-        duration = len(audio_data) / SAMPLE_RATE
-
-        print(f"Transcribing audio: {len(audio_data)} samples ({duration:.2f}s)")
-
-        # Transcribe with NeMo (suppress verbose logs)
-        with NoStdStreams():
-            output = self.model.transcribe([audio_data])
-
-        # Extract text from NeMo output
-        text = output[0].text if output and hasattr(output[0], 'text') else ""
+        """Transcribe an entire recording using bounded inference chunks."""
+        pcm_bytes = _stt_pcm_bytes(audio_bytes)
+        duration = len(pcm_bytes) / (2 * SAMPLE_RATE)
+        text = " ".join(text for _, _, text in self._transcribe_chunks(pcm_bytes))
 
         return {
             "text": text,
-            "language": "en",  # Parakeet TDT 0.6B v3 is English-only
+            "language": "en",
             "segments": [
                 {
                     "id": 0,
@@ -390,141 +405,29 @@ class ParakeetSTTModel:
 
     @modal.method()
     def transcribe_stream(self, audio_bytes: bytes, actual_duration: float = 0.0) -> Iterator[str]:
-        """
-        Transcribe audio with real progressive streaming using silence detection.
-
-        Args:
-            audio_bytes: Raw audio bytes (16-bit PCM, 16kHz, mono WAV)
-            actual_duration: Actual duration from FFmpeg
-
-        Yields:
-            JSON strings: metadata → segment(s) → complete
-        """
-        import numpy as np
-        from pydub import AudioSegment, silence
-
+        """Stream recognized chunks as they finish, followed by the full text."""
         try:
-            # Calculate duration
-            audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
-            duration = actual_duration if actual_duration > 0 else len(audio_array) / SAMPLE_RATE
-
-            # Yield metadata first
+            pcm_bytes = _stt_pcm_bytes(audio_bytes)
+            pcm_duration = len(pcm_bytes) / (2 * SAMPLE_RATE)
+            duration = actual_duration if actual_duration > 0 else pcm_duration
             yield json.dumps({
                 "type": "metadata",
                 "language": "en",
                 "duration": duration,
             })
 
-            # Create AudioSegment for silence detection
-            audio_segment = AudioSegment(
-                data=audio_bytes,
-                channels=1,
-                sample_width=2,  # 16-bit
-                frame_rate=SAMPLE_RATE,
-            )
-
-            # Detect silent windows
-            silent_windows = silence.detect_silence(
-                audio_segment,
-                min_silence_len=SILENCE_MIN_LENGTH_MS,
-                silence_thresh=SILENCE_THRESHOLD_DB,
-            )
-
-            print(f"Detected {len(silent_windows)} silent windows")
-
-            # Accumulate all segment texts for final transcription
-            all_segments = []
-
-            # If no silence detected, transcribe entire audio at once
-            if not silent_windows:
-                audio_float = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
-                with NoStdStreams():
-                    output = self.model.transcribe([audio_float])
-                text = output[0].text if output and hasattr(output[0], 'text') else ""
-
-                if text.strip():
-                    all_segments.append(text)
-
+            all_text = []
+            for segment_id, (start, end, text) in enumerate(self._transcribe_chunks(pcm_bytes)):
+                all_text.append(text)
                 yield json.dumps({
                     "type": "segment",
-                    "id": 0,
-                    "start": 0.0,
-                    "end": duration,
+                    "id": segment_id,
+                    "start": start / 1000.0,
+                    "end": min(end / 1000.0, duration),
                     "text": text,
                 })
-            else:
-                # Transcribe segments progressively based on silence boundaries
-                segment_id = 0
-                current_pos = 0
 
-                for window_start, window_end in silent_windows:
-                    # Extract segment up to end of silence
-                    segment_audio = audio_segment[current_pos:window_end]
-
-                    # Skip very short segments (< 100ms)
-                    if len(segment_audio) < 100:
-                        continue
-
-                    # Transcribe segment
-                    segment_float = np.frombuffer(
-                        segment_audio.raw_data,
-                        dtype=np.int16
-                    ).astype(np.float32)
-
-                    with NoStdStreams():
-                        output = self.model.transcribe([segment_float])
-
-                    text = output[0].text if output and hasattr(output[0], 'text') else ""
-
-                    # Only yield if there's actual text
-                    if text.strip():
-                        start_time = current_pos / 1000.0  # ms → seconds
-                        end_time = window_end / 1000.0
-
-                        all_segments.append(text)
-
-                        yield json.dumps({
-                            "type": "segment",
-                            "id": segment_id,
-                            "start": start_time,
-                            "end": end_time,
-                            "text": text,
-                        })
-
-                        segment_id += 1
-
-                    current_pos = window_end
-
-                # Process any remaining audio after the last silence
-                if current_pos < len(audio_segment):
-                    remaining_audio = audio_segment[current_pos:]
-                    remaining_float = np.frombuffer(
-                        remaining_audio.raw_data,
-                        dtype=np.int16
-                    ).astype(np.float32)
-
-                    with NoStdStreams():
-                        output = self.model.transcribe([remaining_float])
-
-                    text = output[0].text if output and hasattr(output[0], 'text') else ""
-
-                    if text.strip():
-                        all_segments.append(text)
-
-                        yield json.dumps({
-                            "type": "segment",
-                            "id": segment_id,
-                            "start": current_pos / 1000.0,
-                            "end": duration,
-                            "text": text,
-                        })
-
-            # Yield completion with full transcription
-            full_transcription = " ".join(all_segments)
-            yield json.dumps({
-                "type": "complete",
-                "text": full_transcription,
-            })
+            yield json.dumps({"type": "complete", "text": " ".join(all_text)})
 
         except Exception as e:
             import traceback
@@ -536,11 +439,11 @@ class ParakeetSTTModel:
             })
 
 
-@app.cls(**decorator_kwargs)
+@app.cls(**stt_decorator_kwargs)
 class SpeakerDiarizerModel:
     """NVIDIA TitaNet + clustering for speaker diarization."""
 
-    @modal.enter(snap=ENABLE_CPU_MEMORY_SNAPSHOT or ENABLE_GPU_MEMORY_SNAPSHOT)
+    @modal.enter()
     def load_model(self):
         """Load TitaNet speaker embedding model."""
         import logging
@@ -578,7 +481,7 @@ class SpeakerDiarizerModel:
 
         try:
             # Convert bytes to numpy array
-            audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            audio_array = np.frombuffer(_stt_pcm_bytes(audio_bytes), dtype="<i2").astype(np.float32) / 32768.0
 
             # Save to temporary WAV file (NeMo requires file input)
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -1001,7 +904,7 @@ class VoiceStorage:
 class Qwen3TTSVoiceCloner:
     """Qwen3-TTS model for voice cloning."""
 
-    @modal.enter(snap=ENABLE_CPU_MEMORY_SNAPSHOT or ENABLE_GPU_MEMORY_SNAPSHOT)
+    @modal.enter(snap=ENABLE_QWEN_CPU_MEMORY_SNAPSHOT)
     def load_model(self):
         """Load Qwen3-TTS model once per container."""
         import torch
@@ -2388,6 +2291,7 @@ class Qwen3TTSVoiceCloner:
                                         "elapsed_s": t_chunk_elapsed,
                                         "avg_chunk_s": avg_chunk_s,
                                     })
+                                    attempt += 1
                                     continue
 
                                 chunk_result = chunk_wavs[0]
@@ -2445,8 +2349,6 @@ class Qwen3TTSVoiceCloner:
 
                                 attempt += 1
                                 continue
-
-                            attempt += 1
 
                         if chunk_result is None:
                             raise RuntimeError(

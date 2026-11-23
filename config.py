@@ -37,6 +37,7 @@ STT_DTYPE = "auto"  # Use auto dtype selection (bfloat16 on supported GPUs)
 MODAL_APP_NAME = "transcodio-app"
 MODAL_VOLUME_NAME = "parakeet-models"  # Changed from kyutai-stt-models
 MODAL_GPU_TYPE = "L4"  # NVIDIA L4
+MODAL_GPU_FALLBACK_TYPE = "A10G"
 MODAL_GPU_COUNT = 1
 MODAL_CONTAINER_IDLE_TIMEOUT = 20  # 2 minutes
 MODAL_TIMEOUT = 3600  # Kept in sync with modal_app/app.py (3600 is the deployed value)
@@ -47,21 +48,19 @@ MODAL_MEMORY_MB = 8192  # 8GB RAM
 # Enable these one at a time to measure impact on cold start performance
 # ============================================================================
 
-# Optimization 1: CPU Memory Snapshots
+# Optimization 1: Qwen CPU memory snapshots
 # Captures container state after initialization (excludes GPU state)
 # Expected improvement: ~30-50% faster cold starts
-ENABLE_CPU_MEMORY_SNAPSHOT = True
+ENABLE_QWEN_CPU_MEMORY_SNAPSHOT = True
 
-# Optimization 2: GPU Memory Snapshots (Experimental - requires CPU snapshots enabled)
+# Optimization 2: Qwen GPU memory snapshots (requires Qwen CPU snapshots)
 # Captures full GPU state including loaded models and compiled kernels
 # Expected improvement: 85-90% faster cold starts (34s -> 3-5s)
 # NOTE: This is an alpha feature - test thoroughly before production
-ENABLE_GPU_MEMORY_SNAPSHOT = True
+ENABLE_QWEN_GPU_MEMORY_SNAPSHOT = True
 
 # Optimization 3: Model Warm-up Pass
 # Runs a dummy transcription during initialization to compile CUDA kernels
-# Works best WITH GPU snapshots to capture compiled kernels
-# Expected improvement: Minimal without snapshots, significant with GPU snapshots
 ENABLE_MODEL_WARMUP = False  # Kept in sync with modal_app/app.py (warm-up pass disabled there)
 
 # Optimization 4: Extended Container Idle Timeout
